@@ -10,12 +10,13 @@ use Illuminate\Support\Facades\Log;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Cell\StringValueBinder;
 use PhpOffice\PhpSpreadsheet\Cell\Cell;
+use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 
 class DataKunjunganController extends Controller
 {
-    /**
-     * Tampilkan halaman utama
-     */
+    // =====================================================================
+    // INDEX
+    // =====================================================================
     public function index(Request $request): View
     {
         $query = DataKunjungan::query();
@@ -43,17 +44,17 @@ class DataKunjunganController extends Controller
         return view('index', compact('data'));
     }
 
-    /**
-     * Handle upload dan import file CSV/Excel
-     */
+    // =====================================================================
+    // IMPORT
+    // =====================================================================
     public function import(Request $request): JsonResponse
     {
         $request->validate([
-            'file' => 'required|file|mimes:csv,xlsx,xls|max:10240',
+            'file' => 'required|file|mimes:xlsx,xls|max:10240',
         ], [
             'file.required' => 'File harus dipilih.',
-            'file.mimes'    => 'Format file harus CSV, XLS, atau XLSX.',
-            'file.max'      => 'Ukuran file maksimal 20MB.',
+            'file.mimes'    => 'Format file harus XLS atau XLSX.',
+            'file.max'      => 'Ukuran file maksimal 10MB.',
         ]);
 
         try {
@@ -61,19 +62,99 @@ class DataKunjunganController extends Controller
             $extension = strtolower($file->getClientOriginalExtension());
             $filePath  = $file->getPathname();
 
-            // Debug: log nama file
-            Log::info('Import file: ' . $file->getClientOriginalName());
+            $rows = $this->readExcel($filePath);
 
-            if ($extension === 'csv') {
-                return $this->importCsv($filePath);
-            } else {
-                $rows = $this->readExcel($filePath);
-                return $this->processRows($rows);
+            Log::info('Import file: ' . $file->getClientOriginalName());
+            Log::info('Total baris terbaca (termasuk header): ' . count($rows));
+
+            if (empty($rows)) {
+                return response()->json(['success' => false, 'message' => 'File kosong atau tidak ada data.'], 422);
             }
+
+            // Ambil & normalisasi heading
+            // Skip baris pertama
+            array_shift($rows);
+
+            // Ambil baris kedua sebagai heading
+            $rawHeadings = array_shift($rows);
+            Log::info('Heading asli: ' . json_encode($rawHeadings));
+
+            $headings = array_map(function ($h) {
+                $h = trim((string) $h);
+                $h = mb_strtolower($h);
+                $h = preg_replace('/[\s\.\-\/\\\\]+/', '_', $h);
+                $h = preg_replace('/[^a-z0-9_]/', '', $h);
+                $h = trim($h, '_');
+                return $h;
+            }, $rawHeadings);
+
+            Log::info('Heading normalisasi: ' . json_encode($headings));
+
+            if (empty(array_filter($headings))) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Heading kolom tidak terbaca. Pastikan baris pertama berisi nama kolom.',
+                ], 422);
+            }
+
+            $imported = 0;
+            $skipped  = 0;
+            $batch    = [];
+
+            foreach ($rows as $rowIndex => $row) {
+                $row = array_pad((array) $row, count($headings), null);
+                $row = array_slice($row, 0, count($headings));
+                $data = array_combine($headings, $row);
+
+                // Skip baris kosong
+                if (empty(array_filter($data, fn($v) => $v !== null && trim((string)$v) !== ''))) {
+                    $skipped++;
+                    continue;
+                }
+
+                Log::debug("Baris " . ($rowIndex + 2) . " data: " . json_encode($data));
+
+                $batch[] = [
+                    'no'                => $this->getExact($data, ['no', 'nomor', 'No']),
+                    'wbp'               => $this->getExact($data, ['wbp', 'nama_wbp', 'namawbp', 'WBP', 'warga']),
+                    'nomor_registrasi'  => $this->getExact($data, ['Nomor Registrasi','nomor_registrasi', 'no_registrasi', 'nomer_registrasi']),
+                    'no_kunjungan'      => $this->getExact($data, ['No Kunjungan','no_kunjungan', 'nomor_kunjungan', 'nomer_kunjungan']),
+                    'pengunjung'        => $this->getExact($data, ['Pengunjung','pengunjung', 'nama_pengunjung']),
+                    'jenis_kelamin'     => $this->getExact($data, ['Jenis Kelamin','jenis_kelamin', 'jeniskelamin', 'gender']),
+                    'hubungan'          => $this->getExact($data, ['Hubungan','hubungan', 'hub']),
+                    'sub_hubungan'      => $this->getExact($data, ['Sub Hubungan','sub_hubungan', 'subhubungan', 'sub_hub']),
+                    'alamat_pengunjung' => $this->getExact($data, ['Alamat Pengunjung','alamat_pengunjung', 'alamat_penunjung', 'alamat', 'address']),
+                    'no_identitas'      => $this->normalizeNik(
+                        $this->getExact($data, ['No Identitas','no_identitas', 'noidentitas', 'nik', 'no_ktp', 'ktp', 'nomor_identitas'])
+                    ),
+                    'waktu_kunjungan'   => $this->normalizeDate(
+                        $this->getExact($data, ['Waktu Kunjungan','waktu_kunjungan', 'waktu', 'tanggal', 'tanggal_kunjungan', 'tgl', 'tgl_kunjungan'])
+                    ),
+                    'no_kamar'          => $this->getExact($data, ['No Kamar','no_kamar', 'nokamar', 'kamar', 'blok', 'no_blok']),
+                    'catatan'           => $this->getExact($data, ['Catatan','catatan', 'notes', 'keterangan', 'ket']),
+                ];
+
+                $imported++;
+
+                if (count($batch) >= 500) {
+                    DataKunjungan::insert($batch);
+                    $batch = [];
+                }
+            }
+
+            if (!empty($batch)) {
+                DataKunjungan::insert($batch);
+            }
+
+            Log::info("Import selesai: {$imported} masuk, {$skipped} dilewati.");
+
+            return response()->json([
+                'success' => true,
+                'message' => "Berhasil mengimport {$imported} data kunjungan.",
+            ]);
         } catch (\Exception $e) {
             Log::error('Import error: ' . $e->getMessage());
             Log::error($e->getTraceAsString());
-
             return response()->json([
                 'success' => false,
                 'message' => 'Terjadi kesalahan: ' . $e->getMessage(),
@@ -81,426 +162,37 @@ class DataKunjunganController extends Controller
         }
     }
 
-    /**
-     * Import CSV dengan pemrosesan bertahap untuk menghindari memory leak
-     */
-    private function importCsv(string $filePath): JsonResponse
-    {
-        $handle = fopen($filePath, 'r');
-
-        // Buang BOM jika ada
-        $bom = fread($handle, 3);
-        if ($bom !== "\xEF\xBB\xBF") {
-            rewind($handle);
-        }
-
-        // Deteksi delimiter
-        $firstLine = fgets($handle);
-        rewind($handle);
-        if ($bom === "\xEF\xBB\xBF") {
-            fread($handle, 3);
-        }
-        $delimiter = substr_count($firstLine, ';') > substr_count($firstLine, ',') ? ';' : ',';
-
-        // Baca heading
-        $rawHeadings = fgetcsv($handle, 0, $delimiter, '"');
-        if (!$rawHeadings) {
-            fclose($handle);
-            return response()->json(['success' => false, 'message' => 'File kosong atau tidak ada data.'], 422);
-        }
-
-        // Normalisasi heading
-        $headings = array_map(function ($h) {
-            $h = trim((string) $h);
-            $h = mb_strtolower($h);
-            $h = preg_replace('/[\s\.\-\/\\\\]+/', '_', $h);
-            $h = preg_replace('/[^a-z0-9_]/', '', $h);
-            $h = trim($h, '_');
-            return $h;
-        }, $rawHeadings);
-
-        if (empty(array_filter($headings))) {
-            fclose($handle);
-            return response()->json([
-                'success' => false,
-                'message' => 'Heading kolom tidak terbaca. Pastikan baris pertama file berisi nama kolom.'
-            ], 422);
-        }
-
-        $imported = 0;
-        $skipped  = 0;
-        $batch    = [];
-
-        while (($row = fgetcsv($handle, 0, $delimiter, '"')) !== false) {
-            $row = array_map(function ($v) {
-                if ($v === null) return '';
-                if (!mb_check_encoding($v, 'UTF-8')) {
-                    $v = mb_convert_encoding($v, 'UTF-8', 'Windows-1252');
-                }
-                return $v;
-            }, $row);
-
-            // Pastikan jumlah kolom row sama dengan heading
-            $row = array_pad((array) $row, count($headings), null);
-            $row = array_slice($row, 0, count($headings));
-
-            // Gabungkan heading dengan nilai baris
-            $data = array_combine($headings, $row);
-
-            // Skip baris yang benar-benar kosong
-            $allEmpty = true;
-            foreach ($data as $val) {
-                if ($val !== null && trim((string) $val) !== '') {
-                    $allEmpty = false;
-                    break;
-                }
-            }
-            if ($allEmpty) {
-                $skipped++;
-                continue;
-            }
-
-            $batch[] = [
-                'no'                => $this->getValue($data, ['no', 'nomor', 'no_']) ?: ($imported + 1),
-                'wbp'               => $this->getValue($data, ['wbp', 'nama_wbp', 'namawbp', 'nama_warga', 'warga']),
-                'nomor_registrasi'  => $this->getValue($data, ['nomor_registrasi', 'no_registrasi', 'registrasi', 'no_reg', 'nomer_registrasi']),
-                'no_kunjungan'      => $this->getValue($data, ['no_kunjungan', 'nomor_kunjungan', 'kunjungan', 'no_kun', 'nomer_kunjungan']),
-                'pengunjung'        => $this->getValue($data, ['pengunjung', 'nama_pengunjung', 'nama_penjung', 'nama']),
-                'jenis_kelamin'     => $this->getValue($data, ['jenis_kelamin', 'jeniskelamin', 'jenis', 'kelamin', 'gender', 'sex']),
-                'hubungan'          => $this->getValue($data, ['hubungan', 'hub']),
-                'sub_hubungan'      => $this->getValue($data, ['sub_hubungan', 'subhubungan', 'sub', 'sub_hub']),
-                'alamat_pengunjung' => $this->getValue($data, ['alamat_pengunjung', 'alamat_penunjung', 'alamat', 'address']),
-                'no_identitas'      => $this->normalizeNik(
-                    $this->getValue($data, ['No_Identitas', 'no_identitas', 'no identitas', 'noidentitas', 'nik', 'ktp', 'identitas', 'no_ktp', 'no_nik'])
-                ),
-                'waktu_kunjungan'   => $this->normalizeDate(
-                    $this->getValue($data, ['waktu_kunjungan', 'waktu', 'tanggal', 'tanggal_kunjungan', 'tgl', 'tgl_kunjungan', 'datetime'])
-                ),
-                'no_kamar'          => $this->getValue($data, ['no_kamar', 'nokamar', 'kamar', 'blok', 'no_blok', 'blok_kamar']),
-                'catatan'           => $this->getValue($data, ['catatan', 'notes', 'keterangan', 'ket']),
-            ];
-
-            $imported++;
-
-            // Insert per 500 baris
-            if (count($batch) >= 500) {
-                DataKunjungan::insert($batch);
-                $batch = [];
-            }
-        }
-
-        // Insert sisa data
-        if (!empty($batch)) {
-            DataKunjungan::insert($batch);
-        }
-
-        fclose($handle);
-
-        Log::info("Import selesai: {$imported} data masuk, {$skipped} baris dilewati.");
-
-        return response()->json([
-            'success' => true,
-            'message' => "Berhasil mengimport {$imported} data kunjungan.",
-        ]);
-    }
-
-    /**
-     * Proses baris untuk Excel (tetap seperti sebelumnya, tapi dipisah)
-     */
-    private function processRows(array $rows): JsonResponse
-    {
-        // Debug: log jumlah baris yang terbaca
-        Log::info('Total baris terbaca (termasuk header): ' . count($rows));
-
-        if (empty($rows)) {
-            return response()->json(['success' => false, 'message' => 'File kosong atau tidak ada data.'], 422);
-        }
-
-        // Ambil baris pertama sebagai heading
-        $rawHeadings = array_shift($rows);
-
-        // Debug: log heading yang terbaca dari file
-        Log::info('Heading asli dari file: ' . json_encode($rawHeadings));
-
-        // Normalisasi heading: lowercase, trim, ganti spasi/titik/strip dengan underscore
-        $headings = array_map(function ($h) {
-            $h = trim((string) $h);
-            $h = mb_strtolower($h);
-            $h = preg_replace('/[\s\.\-\/\\\\]+/', '_', $h);
-            $h = preg_replace('/[^a-z0-9_]/', '', $h);
-            $h = trim($h, '_');
-            return $h;
-        }, $rawHeadings);
-
-        // Debug: log heading setelah normalisasi
-        Log::info('Heading setelah normalisasi: ' . json_encode($headings));
-
-        if (empty(array_filter($headings))) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Heading kolom tidak terbaca. Pastikan baris pertama file berisi nama kolom.'
-            ], 422);
-        }
-
-        $imported = 0;
-        $skipped  = 0;
-        $batch    = [];
-
-        foreach ($rows as $row) {
-            // Pastikan jumlah kolom row sama dengan heading
-            $row = array_pad((array) $row, count($headings), null);
-            $row = array_slice($row, 0, count($headings));
-
-            // Gabungkan heading dengan nilai baris
-            $data = array_combine($headings, $row);
-
-            // Skip baris yang benar-benar kosong
-            $allEmpty = true;
-            foreach ($data as $val) {
-                if ($val !== null && trim((string) $val) !== '') {
-                    $allEmpty = false;
-                    break;
-                }
-            }
-            if ($allEmpty) {
-                $skipped++;
-                continue;
-            }
-
-            $batch[] = [
-                'no'                => $this->getValue($data, ['no', 'nomor', 'no_']) ?: ($imported + 1),
-                'wbp'               => $this->getValue($data, ['wbp', 'nama_wbp', 'namawbp', 'nama_warga', 'warga']),
-                'nomor_registrasi'  => $this->getValue($data, ['nomor_registrasi', 'no_registrasi', 'registrasi', 'no_reg', 'nomer_registrasi']),
-                'no_kunjungan'      => $this->getValue($data, ['no_kunjungan', 'nomor_kunjungan', 'kunjungan', 'no_kun', 'nomer_kunjungan']),
-                'pengunjung'        => $this->getValue($data, ['pengunjung', 'nama_pengunjung', 'nama_penjung', 'nama']),
-                'jenis_kelamin'     => $this->getValue($data, ['jenis_kelamin', 'jeniskelamin', 'jenis', 'kelamin', 'gender', 'sex']),
-                'hubungan'          => $this->getValue($data, ['hubungan', 'hub']),
-                'sub_hubungan'      => $this->getValue($data, ['sub_hubungan', 'subhubungan', 'sub', 'sub_hub']),
-                'alamat_pengunjung' => $this->getValue($data, ['alamat_pengunjung', 'alamat_penunjung', 'alamat', 'address']),
-                'no_identitas'      => $this->normalizeNik(
-                    $this->getValue($data, ['No_Identitas', 'no_identitas', 'no identitas', 'noidentitas', 'nik', 'ktp', 'identitas', 'no_ktp', 'no_nik'])
-                ),
-                'waktu_kunjungan'   => $this->normalizeDate(
-                    $this->getValue($data, ['waktu_kunjungan', 'waktu', 'tanggal', 'tanggal_kunjungan', 'tgl', 'tgl_kunjungan', 'datetime'])
-                ),
-                'no_kamar'          => $this->getValue($data, ['no_kamar', 'nokamar', 'kamar', 'blok', 'no_blok', 'blok_kamar']),
-                'catatan'           => $this->getValue($data, ['catatan', 'notes', 'keterangan', 'ket']),
-                // 'created_at'        => now(),
-                // 'updated_at'        => now(),
-            ];
-
-            $imported++;
-
-            // Insert per 500 baris agar tidak memory leak
-            if (count($batch) >= 500) {
-                DataKunjungan::insert($batch);
-                $batch = [];
-            }
-        }
-
-        // Insert sisa data
-        if (!empty($batch)) {
-            DataKunjungan::insert($batch);
-        }
-
-        Log::info("Import selesai: {$imported} data masuk, {$skipped} baris dilewati.");
-
-        return response()->json([
-            'success' => true,
-            'message' => "Berhasil mengimport {$imported} data kunjungan.",
-        ]);
-    }
-
-    /**
-     * Baca file CSV - semua kolom otomatis terbaca sebagai string
-     */
-    private function readCsv(string $filePath): array
-    {
-        $rows   = [];
-        $handle = fopen($filePath, 'r');
-
-        // Buang BOM jika ada (file Excel CSV sering ada BOM di awal)
-        $bom = fread($handle, 3);
-        if ($bom !== "\xEF\xBB\xBF") {
-            rewind($handle);
-        }
-
-        // Deteksi delimiter otomatis: koma atau titik koma
-        $firstLine = fgets($handle);
-        rewind($handle);
-        if ($bom === "\xEF\xBB\xBF") {
-            fread($handle, 3); // skip BOM lagi
-        }
-        $delimiter = substr_count($firstLine, ';') > substr_count($firstLine, ',') ? ';' : ',';
-
-        while (($row = fgetcsv($handle, 0, $delimiter, '"')) !== false) {
-            $row = array_map(function ($v) {
-                if ($v === null) return '';
-                if (!mb_check_encoding($v, 'UTF-8')) {
-                    $v = mb_convert_encoding($v, 'UTF-8', 'Windows-1252');
-                }
-                return $v;
-            }, $row);
-
-            $rows[] = $row;
-        }
-
-        fclose($handle);
-        return $rows;
-    }
-
-    /**
-     * Baca file Excel dengan StringValueBinder
-     * KUNCI: agar NIK tidak berubah jadi Scientific Notation
-     */
-    private function readExcel(string $filePath): array
-    {
-        // Set StringValueBinder agar semua sel dibaca sebagai string
-        Cell::setValueBinder(new StringValueBinder());
-
-        $spreadsheet = IOFactory::load($filePath);
-        $sheet       = $spreadsheet->getActiveSheet();
-        $rows        = [];
-
-        $highestRow    = $sheet->getHighestDataRow();
-        $highestColumn = $sheet->getHighestDataColumn();
-
-        for ($rowNum = 1; $rowNum <= $highestRow; $rowNum++) {
-            $cellRange = $sheet->rangeToArray(
-                'A' . $rowNum . ':' . $highestColumn . $rowNum,
-                null,   // nullValue
-                true,   // calculateFormulas
-                false,  // formatData -> FALSE agar angka tidak diformat
-                false   // returnCellRef
-            );
-
-            $rowData = array_map(function ($val) {
-                if ($val === null) return '';
-                if ($val instanceof \PhpOffice\PhpSpreadsheet\RichText\RichText) {
-                    return $val->getPlainText();
-                }
-                return (string) $val;
-            }, $cellRange[0] ?? []);
-
-            $rows[] = $rowData;
-        }
-
-        return $rows;
-    }
-
-    /**
-     * Ambil nilai dari array berdasarkan beberapa kemungkinan key
-     */
-    private function getValue(array $data, array $keys): ?string
-    {
-        foreach ($keys as $key) {
-            // Exact match
-            if (array_key_exists($key, $data) && trim((string)($data[$key] ?? '')) !== '') {
-                return trim((string) $data[$key]);
-            }
-            // Partial match: cek apakah key ada sebagai bagian dari key di data
-            foreach ($data as $dataKey => $dataVal) {
-                if (str_contains($dataKey, $key) && trim((string)($dataVal ?? '')) !== '') {
-                    return trim((string) $dataVal);
-                }
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Normalisasi tanggal dari berbagai format ke format Y-m-d
-     * Menangani:
-     * - Excel Serial Number : 45306       → 2024-01-15
-     * - Format Indonesia    : 15/01/2024  → 2024-01-15
-     * - Format dengan jam   : 2024-01-15 09:00:00 → 2024-01-15
-     * - Format standar      : 2024-01-15  → 2024-01-15
-     */
-    private function normalizeDate(?string $value): ?string
-    {
-        if ($value === null || trim($value) === '') {
-            return null;
-        }
-
-        $value = trim($value);
-
-        // Angka murni = Excel Date Serial Number
-        // Contoh: 45306 = 15 Januari 2024
-        if (is_numeric($value) && !str_contains($value, '.')) {
-            try {
-                $unixTimestamp = ((int) $value - 25569) * 86400;
-                $date = \DateTime::createFromFormat('U', (string) $unixTimestamp);
-                return $date ? $date->format('Y-m-d') : null;
-            } catch (\Exception $e) {
-                return null;
-            }
-        }
-
-        // Format Indonesia: dd/mm/yyyy atau dd-mm-yyyy
-        if (preg_match('/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/', $value, $m)) {
-            return sprintf('%04d-%02d-%02d', $m[3], $m[2], $m[1]);
-        }
-
-        // Format dengan jam, ambil tanggal saja: 2024-01-15 09:00:00
-        if (preg_match('/^(\d{4}-\d{2}-\d{2})/', $value, $m)) {
-            return $m[1];
-        }
-
-        // Fallback: coba parse dengan strtotime
-        $timestamp = strtotime($value);
-        if ($timestamp !== false) {
-            return date('Y-m-d', $timestamp);
-        }
-
-        return null;
-    }
-
-    /**
-     * Normalisasi NIK dari Scientific Notation ke angka penuh
-     * Input:  "3.57123E+15" atau "3,57123E+15"
-     * Output: "3571230000000000"
-     */
-    private function normalizeNik(?string $value): ?string
-    {
-        if ($value === null || trim($value) === '') {
-            return null;
-        }
-
-        $value = trim($value);
-
-        // Deteksi Scientific Notation
-        if (preg_match('/^[\d,\.]+[eE][+\-]?\d+$/', $value)) {
-            $value  = str_replace(',', '.', $value);
-            $result = sprintf('%.0f', (float) $value);
-            return $result;
-        }
-
-        // Bersihkan karakter non-digit
-        $cleaned = preg_replace('/[^\d]/', '', $value);
-
-        if (strlen($cleaned) >= 10 && strlen($cleaned) <= 20) {
-            return $cleaned;
-        }
-
-        return $value;
-    }
-
-    /**
-     * Hapus semua data
-     */
-    public function truncate(): JsonResponse
+    // =====================================================================
+    // UPDATE
+    // =====================================================================
+    public function update(Request $request, int $id): JsonResponse
     {
         try {
-            DataKunjungan::truncate();
-            return response()->json(['success' => true, 'message' => 'Semua data berhasil dihapus.']);
+            $item = DataKunjungan::findOrFail($id);
+            $item->update([
+                'no'                => $request->no,
+                'wbp'               => $request->wbp,
+                'nomor_registrasi'  => $request->nomor_registrasi,
+                'no_kunjungan'      => $request->no_kunjungan,
+                'pengunjung'        => $request->pengunjung,
+                'jenis_kelamin'     => $request->jenis_kelamin,
+                'hubungan'          => $request->hubungan,
+                'sub_hubungan'      => $request->sub_hubungan,
+                'alamat_pengunjung' => $request->alamat_pengunjung,
+                'no_identitas'      => $request->no_identitas,
+                'waktu_kunjungan'   => $request->waktu_kunjungan ?: null,
+                'no_kamar'          => $request->no_kamar,
+                'catatan'           => $request->catatan,
+            ]);
+            return response()->json(['success' => true, 'message' => 'Data berhasil diperbarui.']);
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
 
-    /**
-     * Hapus satu record
-     */
+    // =====================================================================
+    // DESTROY
+    // =====================================================================
     public function destroy(int $id): JsonResponse
     {
         try {
@@ -509,5 +201,183 @@ class DataKunjunganController extends Controller
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
+    }
+
+    // =====================================================================
+    // PRIVATE: BACA EXCEL
+    // =====================================================================
+    private function readExcel(string $filePath): array
+    {
+        Cell::setValueBinder(new StringValueBinder());
+
+        $spreadsheet   = IOFactory::load($filePath);
+        $sheet         = $spreadsheet->getActiveSheet();
+        $rows          = [];
+        $highestRow    = $sheet->getHighestDataRow();
+        $highestColumn = $sheet->getHighestDataColumn();
+
+        for ($rowNum = 1; $rowNum <= $highestRow; $rowNum++) {
+            $rowData = [];
+            foreach ($sheet->getRowIterator($rowNum, $rowNum)->current()->getCellIterator('A', $highestColumn) as $cell) {
+                $rowData[] = $this->readCellValue($cell);
+            }
+            $rows[] = $rowData;
+        }
+
+        return $rows;
+    }
+
+    private function readCellValue(\PhpOffice\PhpSpreadsheet\Cell\Cell $cell): string
+    {
+        $rawValue   = $cell->getValue();
+        $dataType   = $cell->getDataType();
+        $formatCode = $cell->getStyle()->getNumberFormat()->getFormatCode();
+
+        if ($rawValue === null || $rawValue === '') return '';
+
+        if ($rawValue instanceof \PhpOffice\PhpSpreadsheet\RichText\RichText) {
+            return $rawValue->getPlainText();
+        }
+
+        // String / Text
+        if ($dataType === \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING) {
+            return (string) $rawValue;
+        }
+
+        // Format tanggal → konversi ke Y-m-d
+        if ($this->isDateTimeFormat($formatCode) && is_numeric($rawValue)) {
+            try {
+                return ExcelDate::excelToDateTimeObject((float) $rawValue)->format('Y-m-d');
+            } catch (\Exception $e) {
+                $unix = ((int)$rawValue - 25569) * 86400;
+                return $unix > 0 ? date('Y-m-d', $unix) : (string)$rawValue;
+            }
+        }
+
+        // Numerik
+        if (is_numeric($rawValue)) {
+            $floatVal = (float) $rawValue;
+            if ($floatVal >= 1_000_000_000 && $floatVal == floor($floatVal)) {
+                return sprintf('%.0f', $floatVal);
+            }
+            if ($floatVal == floor($floatVal)) {
+                return (string)(int)$floatVal;
+            }
+            return (string)$floatVal;
+        }
+
+        return (string) $rawValue;
+    }
+
+    // =====================================================================
+    // PRIVATE: HELPERS
+    // =====================================================================
+
+    /**
+     * Ambil nilai dari $data berdasarkan key yang PERSIS cocok (exact match).
+     * Tidak menggunakan str_contains agar kolom 'no' tidak tertukar dengan
+     * 'no_kunjungan', 'no_kamar', dst.
+     */
+    private function getExact(array $data, array $keys): ?string
+    {
+        foreach ($keys as $key) {
+            if (array_key_exists($key, $data) && trim((string)($data[$key] ?? '')) !== '') {
+                return trim((string) $data[$key]);
+            }
+        }
+        return null;
+    }
+
+    private function normalizeNik(?string $value): ?string
+    {
+        if ($value === null || trim($value) === '') return null;
+        $value = trim($value);
+
+        // Scientific notation: 3,57123E+15 atau 3.57123E+15
+        if (preg_match('/^[\d,\.]+[eE][+\-]?\d+$/', $value)) {
+            return sprintf('%.0f', (float) str_replace(',', '.', $value));
+        }
+
+        $cleaned = preg_replace('/[^\d]/', '', $value);
+        return (strlen($cleaned) >= 10 && strlen($cleaned) <= 20) ? $cleaned : $value;
+    }
+
+    private function isDateTimeFormat(string $formatCode): bool
+    {
+        if (empty($formatCode)) return false;
+        $lower = strtolower($formatCode);
+        $dateTimePatterns = [
+            'yyyy',
+            'yy',
+            'y',
+            'mm',
+            'm',
+            'dd',
+            'd',
+            'd/m/y',
+            'm/d/y',
+            'dd/mm',
+            'mm/dd',
+            'h:mm',
+            'hh:mm',
+            'am/pm',
+            'ss',
+            'h:mm:ss'
+        ];
+        foreach ($dateTimePatterns as $pattern) {
+            if (str_contains($lower, $pattern)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Normalisasi tanggal ke format Y-m-d untuk disimpan ke database.
+     */
+    private function normalizeDate(?string $value): ?string
+    {
+        if ($value === null || trim($value) === '') return null;
+        $value = trim($value);
+
+        // Sudah Y-m-d
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
+            return $value;
+        }
+
+        // Y-m-d H:i:s → ambil tanggal saja
+        if (preg_match('/^(\d{4}-\d{2}-\d{2})[\sT]/', $value, $m)) {
+            return $m[1];
+        }
+
+        // dd/mm/yyyy atau dd-mm-yyyy (tanpa jam)
+        if (preg_match('/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/', $value, $m)) {
+            [$day, $month, $year] = [(int)$m[1], (int)$m[2], (int)$m[3]];
+            if (checkdate($month, $day, $year)) {
+                return sprintf('%04d-%02d-%02d', $year, $month, $day);
+            }
+        }
+
+        // Excel serial number (angka bulat, range 1900–2100)
+        if (ctype_digit($value)) {
+            $serial = (int)$value;
+            if ($serial > 1 && $serial < 73000) {
+                try {
+                    return ExcelDate::excelToDateTimeObject((float)$serial)->format('Y-m-d');
+                } catch (\Exception $e) {
+                    $unix = ($serial - 25569) * 86400;
+                    if ($unix > 0) return date('Y-m-d', $unix);
+                }
+            }
+        }
+
+        // Fallback strtotime
+        $ts = strtotime($value);
+        if ($ts !== false && $ts > 0) {
+            return date('Y-m-d', $ts);
+        }
+
+        Log::warning("normalizeDate: tidak dapat mem-parse: [{$value}]");
+        return null;
     }
 }

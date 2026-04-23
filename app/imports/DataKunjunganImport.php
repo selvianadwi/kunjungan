@@ -5,137 +5,126 @@ namespace App\Imports;
 use App\Models\DataKunjungan;
 use Maatwebsite\Excel\Concerns\ToModel;
 use Maatwebsite\Excel\Concerns\WithHeadingRow;
-use Maatwebsite\Excel\Concerns\WithCustomCsvSettings;
 use Maatwebsite\Excel\Concerns\SkipsEmptyRows;
+use Maatwebsite\Excel\Concerns\WithCustomValueBinder;
+use PhpOffice\PhpSpreadsheet\Cell\DefaultValueBinder;
+use PhpOffice\PhpSpreadsheet\Cell\DataType;
 use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
+use Carbon\Carbon;
 
-class DataKunjunganImport implements ToModel, WithHeadingRow, SkipsEmptyRows
+class DataKunjunganImport extends DefaultValueBinder implements ToModel, WithHeadingRow, SkipsEmptyRows, WithCustomValueBinder
 {
     private int $importedCount = 0;
 
-    /**
-     * Konversi Scientific Notation NIK ke format angka penuh
-     * Contoh: "3.57123E+15" -> "3571230000000000" (tidak akurat)
-     * Solusi terbaik: baca sebagai string dari awal
-     */
-    private function normalizeNik(mixed $value): string
+    private function normalizeNik($value): ?string
     {
         if ($value === null || $value === '') {
-            return '';
+            return null;
         }
 
-        $strValue = (string) $value;
+        $value = trim((string)$value);
 
-        // Deteksi scientific notation (e.g., 3.57123E+15 atau 3,57123E+15)
-        if (preg_match('/^[\d,\.]+[eE][+\-]?\d+$/', trim($strValue))) {
-            // Ganti koma desimal (format Indonesia) dengan titik
-            $strValue = str_replace(',', '.', $strValue);
-
-            // Konversi scientific notation ke integer penuh
-            // Gunakan bcmath untuk presisi tinggi
-            $number = (float) $strValue;
-
-            // Format tanpa scientific notation, tanpa desimal
-            $formatted = number_format($number, 0, '.', '');
-
-            return $formatted;
+        // Jika scientific notation
+        if (preg_match('/^[0-9\.]+E\+\d+$/i', $value)) {
+            // Pakai string conversion tanpa float
+            $value = sprintf('%.0f', $value);
         }
 
-        // Hapus karakter non-digit kecuali jika bukan NIK
-        // NIK hanya angka
-        $cleaned = preg_replace('/[^\d]/', '', $strValue);
+        // Ambil hanya angka
+        $value = preg_replace('/[^0-9]/', '', $value);
 
-        return $cleaned ?: $strValue;
+        return $value ?: null;
     }
 
-    /**
-     * Normalisasi nilai waktu/tanggal dari Excel
-     */
-    private function normalizeDate(mixed $value): string
+    private function normalizeDate($value): ?string
     {
-        if ($value === null || $value === '') {
-            return '';
-        }
+        if (!$value) return null;
 
-        // Jika numeric (Excel date serial number)
-        if (is_numeric($value)) {
-            try {
-                $date = ExcelDate::excelToDateTimeObject($value);
-                return $date->format('Y-m-d H:i:s');
-            } catch (\Exception $e) {
-                return (string) $value;
+        try {
+            if (is_numeric($value)) {
+                return ExcelDate::excelToDateTimeObject($value)->format('Y-m-d');
             }
-        }
 
-        return (string) $value;
+            return Carbon::parse($value)->format('Y-m-d');
+        } catch (\Exception $e) {
+            return null;
+        }
     }
 
-    /**
-     * Normalisasi heading key (hapus spasi, lowercase, ganti spasi dengan underscore)
-     */
-    private function getValueByPossibleKeys(array $row, array $keys): mixed
+
+    private function getValue(array $row, array $keys)
     {
         foreach ($keys as $key) {
-            // Coba key langsung
-            if (array_key_exists($key, $row) && $row[$key] !== null) {
-                return $row[$key];
-            }
-            // Coba lowercase
-            $lower = strtolower($key);
-            if (array_key_exists($lower, $row) && $row[$lower] !== null) {
-                return $row[$lower];
+            $key = strtolower($key);
+
+            foreach ($row as $k => $v) {
+                if (strtolower(trim($k)) === $key) {
+                    return $v;
+                }
             }
         }
         return null;
     }
 
-    public function model(array $row): ?DataKunjungan
+    public function model(array $row)
     {
-        // Skip baris kosong
-        $allEmpty = true;
-        foreach ($row as $val) {
-            if ($val !== null && $val !== '') {
-                $allEmpty = false;
-                break;
-            }
+        // Skip jika kosong
+        if (count(array_filter($row)) === 0) {
+            return null;
         }
-        if ($allEmpty) return null;
 
-        // Map kolom dengan berbagai kemungkinan nama heading
-        $no              = $this->getValueByPossibleKeys($row, ['no', 'no_', 'nomor']);
-        $wbp             = $this->getValueByPossibleKeys($row, ['wbp', 'nama_wbp', 'namawbp']);
-        $noReg           = $this->getValueByPossibleKeys($row, ['nomor_registrasi', 'no_registrasi', 'registrasi']);
-        $noKunjungan     = $this->getValueByPossibleKeys($row, ['no_kunjungan', 'nomor_kunjungan', 'kunjungan']);
-        $pengunjung      = $this->getValueByPossibleKeys($row, ['pengunjung', 'nama_pengunjung']);
-        $jenisKelamin    = $this->getValueByPossibleKeys($row, ['jenis_kelamin', 'jeniskelamin', 'kelamin', 'gender']);
-        $hubungan        = $this->getValueByPossibleKeys($row, ['hubungan']);
-        $subHubungan     = $this->getValueByPossibleKeys($row, ['sub_hubungan', 'subhubungan', 'sub']);
-        $alamat          = $this->getValueByPossibleKeys($row, ['alamat_pengunjung', 'alamat_penunjung', 'alamat']);
-        $noIdentitas     = $this->getValueByPossibleKeys($row, ['no_identitas', 'noidentitas', 'nik', 'ktp', 'identitas']);
-        $waktuKunjungan  = $this->getValueByPossibleKeys($row, ['waktu_kunjungan', 'waktu', 'tanggal', 'tanggal_kunjungan']);
-        $noKamar         = $this->getValueByPossibleKeys($row, ['no_kamar', 'nokamar', 'kamar', 'blok']);
-        $catatan         = $this->getValueByPossibleKeys($row, ['catatan', 'notes', 'keterangan']);
-
-        // Normalisasi NIK - ini bagian terpenting
-        $nikNormalized = $this->normalizeNik($noIdentitas);
+        $nik = $this->normalizeNik(
+            $this->getValue($row, ['no_identitas', 'nik', 'ktp'])
+        );
 
         $this->importedCount++;
 
         return new DataKunjungan([
-            'no'              => $no ? (int) $no : $this->importedCount,
-            'wbp'             => $wbp,
-            'nomor_registrasi'=> $noReg,
-            'no_kunjungan'    => $noKunjungan,
-            'pengunjung'      => $pengunjung,
-            'jenis_kelamin'   => $jenisKelamin,
-            'hubungan'        => $hubungan,
-            'sub_hubungan'    => $subHubungan,
-            'alamat_pengunjung'=> $alamat,
-            'no_identitas'    => $nikNormalized,
-            'waktu_kunjungan' => $this->normalizeDate($waktuKunjungan),
-            'no_kamar'        => $noKamar,
-            'catatan'         => $catatan,
+            'no' => $this->importedCount,
+
+            'wbp' => $this->getValue($row, ['wbp', 'nama_wbp']),
+            'nomor_registrasi' => $this->getValue($row, ['nomor_registrasi']),
+            'no_kunjungan' => $this->getValue($row, ['no_kunjungan']),
+            'pengunjung' => $this->getValue($row, ['pengunjung']),
+            'jenis_kelamin' => $this->mapGender(
+                $this->getValue($row, ['jenis_kelamin', 'gender'])
+            ),
+            'hubungan' => $this->getValue($row, ['hubungan']),
+            'sub_hubungan' => $this->getValue($row, ['sub_hubungan']),
+            'alamat_pengunjung' => $this->getValue($row, ['alamat_pengunjung', 'alamat']),
+
+            'no_identitas' => $nik,
+
+            'waktu_kunjungan' => $this->normalizeDate(
+                $this->getValue($row, ['waktu_kunjungan', 'tanggal'])
+            ),
+
+            'no_kamar' => $this->getValue($row, ['no_kamar']),
+            'catatan' => $this->getValue($row, ['catatan']),
         ]);
+    }
+
+  
+    private function mapGender($value)
+    {
+        if (!$value) return null;
+
+        $v = strtolower($value);
+
+        if (in_array($v, ['l', 'laki', 'laki-laki'])) return 'Laki-laki';
+        if (in_array($v, ['p', 'perempuan'])) return 'Perempuan';
+
+        return null;
+    }
+
+    public function bindValue(\PhpOffice\PhpSpreadsheet\Cell\Cell $cell, $value)
+    {
+        if (is_numeric($value)) {
+            $cell->setValueExplicit($value, DataType::TYPE_STRING);
+            return true;
+        }
+
+        return parent::bindValue($cell, $value);
     }
 
     public function getImportedCount(): int

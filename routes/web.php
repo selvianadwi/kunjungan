@@ -7,7 +7,9 @@ Route::get('/', function () {
     return view('welcome');
 });
 
-Route::get('/kunjungan', [DataKunjunganController::class, 'index'])->name('kunjungan.index');
-Route::post('/kunjungan/import', [DataKunjunganController::class, 'import'])->name('kunjungan.import');
-Route::delete('/kunjungan/truncate', [DataKunjunganController::class, 'truncate'])->name('kunjungan.truncate');
-Route::delete('/kunjungan/{id}', [DataKunjunganController::class, 'destroy'])->name('kunjungan.destroy');
+
+Route::put('/kunjungan/{id}', [DataKunjunganController::class, 'update'])->name('kunjungan.update');
+Route::get('/', [DataKunjunganController::class, 'index'])->name('kunjungan.index');
+Route::post('/import', [DataKunjunganController::class, 'import'])->name('kunjungan.import');
+Route::delete('/{id}', [DataKunjunganController::class, 'destroy'])->name('kunjungan.destroy');
+Route::put('/{id}', [DataKunjunganController::class, 'update'])->name('kunjungan.update');
