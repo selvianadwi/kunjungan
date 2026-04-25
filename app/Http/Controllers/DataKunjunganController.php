@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 use App\Models\DataKunjungan;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\View\View;
 use Illuminate\Support\Facades\Log;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Cell\StringValueBinder;
@@ -14,11 +13,46 @@ use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 
 class DataKunjunganController extends Controller
 {
-    // =====================================================================
-    // INDEX
-    // =====================================================================
-    public function index(Request $request): View
+    // =========================================================================
+    // AUTH CHECK
+    // Dipanggil di awal setiap method sebagai pengganti middleware.
+    //
+    // - checkAuth()     → untuk method yang return View/Redirect
+    // - checkAuthJson() → untuk method yang return JsonResponse (AJAX)
+    //
+    // Cara pakai:
+    //   if ($redirect = $this->checkAuth()) return $redirect;
+    //   if ($error = $this->checkAuthJson()) return $error;
+    // =========================================================================
+
+    private function checkAuth()
     {
+        if (!session('logged_in')) {
+            return redirect()->route('login')->with('error', 'Silakan login terlebih dahulu.');
+        }
+        return null;
+    }
+
+    private function checkAuthJson(): ?JsonResponse
+    {
+        if (!session('logged_in')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Sesi habis. Silakan login kembali.',
+            ], 401);
+        }
+        return null;
+    }
+
+    // =========================================================================
+    // INDEX
+    // =========================================================================
+
+    public function index(Request $request)
+    {
+        // Cek login — jika belum, redirect ke halaman login
+        if ($redirect = $this->checkAuth()) return $redirect;
+
         $query = DataKunjungan::query();
 
         if ($request->filled('search')) {
@@ -35,6 +69,7 @@ class DataKunjunganController extends Controller
         if ($request->filled('tanggal_dari')) {
             $query->whereDate('waktu_kunjungan', '>=', $request->tanggal_dari);
         }
+
         if ($request->filled('tanggal_sampai')) {
             $query->whereDate('waktu_kunjungan', '<=', $request->tanggal_sampai);
         }
@@ -44,11 +79,15 @@ class DataKunjunganController extends Controller
         return view('index', compact('data'));
     }
 
-    // =====================================================================
-    // IMPORT
-    // =====================================================================
+    // =========================================================================
+    // IMPORT EXCEL
+    // =========================================================================
+
     public function import(Request $request): JsonResponse
     {
+        // Cek login — jika belum, return JSON 401
+        if ($error = $this->checkAuthJson()) return $error;
+
         $request->validate([
             'file' => 'required|file|mimes:xlsx,xls|max:10240',
         ], [
@@ -58,11 +97,9 @@ class DataKunjunganController extends Controller
         ]);
 
         try {
-            $file      = $request->file('file');
-            $extension = strtolower($file->getClientOriginalExtension());
-            $filePath  = $file->getPathname();
-
-            $rows = $this->readExcel($filePath);
+            $file     = $request->file('file');
+            $filePath = $file->getPathname();
+            $rows     = $this->readExcel($filePath);
 
             Log::info('Import file: ' . $file->getClientOriginalName());
             Log::info('Total baris terbaca (termasuk header): ' . count($rows));
@@ -71,12 +108,12 @@ class DataKunjunganController extends Controller
                 return response()->json(['success' => false, 'message' => 'File kosong atau tidak ada data.'], 422);
             }
 
-            // Ambil & normalisasi heading
-            // Skip baris pertama
+            // Baris pertama: judul/metadata → dilewati
             array_shift($rows);
 
-            // Ambil baris kedua sebagai heading
+            // Baris kedua: heading kolom
             $rawHeadings = array_shift($rows);
+
             Log::info('Heading asli: ' . json_encode($rawHeadings));
 
             $headings = array_map(function ($h) {
@@ -84,8 +121,7 @@ class DataKunjunganController extends Controller
                 $h = mb_strtolower($h);
                 $h = preg_replace('/[\s\.\-\/\\\\]+/', '_', $h);
                 $h = preg_replace('/[^a-z0-9_]/', '', $h);
-                $h = trim($h, '_');
-                return $h;
+                return trim($h, '_');
             }, $rawHeadings);
 
             Log::info('Heading normalisasi: ' . json_encode($headings));
@@ -93,7 +129,7 @@ class DataKunjunganController extends Controller
             if (empty(array_filter($headings))) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Heading kolom tidak terbaca. Pastikan baris pertama berisi nama kolom.',
+                    'message' => 'Heading kolom tidak terbaca. Pastikan baris kedua berisi nama kolom.',
                 ], 422);
             }
 
@@ -101,37 +137,34 @@ class DataKunjunganController extends Controller
             $skipped  = 0;
             $batch    = [];
 
-            foreach ($rows as $rowIndex => $row) {
-                $row = array_pad((array) $row, count($headings), null);
-                $row = array_slice($row, 0, count($headings));
+            foreach ($rows as $row) {
+                $row  = array_pad((array) $row, count($headings), null);
+                $row  = array_slice($row, 0, count($headings));
                 $data = array_combine($headings, $row);
 
-                // Skip baris kosong
-                if (empty(array_filter($data, fn($v) => $v !== null && trim((string)$v) !== ''))) {
+                if (empty(array_filter($data, fn($v) => $v !== null && trim((string) $v) !== ''))) {
                     $skipped++;
                     continue;
                 }
 
-                Log::debug("Baris " . ($rowIndex + 2) . " data: " . json_encode($data));
-
                 $batch[] = [
-                    'no'                => $this->getExact($data, ['no', 'nomor', 'No']),
-                    'wbp'               => $this->getExact($data, ['wbp', 'nama_wbp', 'namawbp', 'WBP', 'warga']),
-                    'nomor_registrasi'  => $this->getExact($data, ['Nomor Registrasi','nomor_registrasi', 'no_registrasi', 'nomer_registrasi']),
-                    'no_kunjungan'      => $this->getExact($data, ['No Kunjungan','no_kunjungan', 'nomor_kunjungan', 'nomer_kunjungan']),
-                    'pengunjung'        => $this->getExact($data, ['Pengunjung','pengunjung', 'nama_pengunjung']),
-                    'jenis_kelamin'     => $this->getExact($data, ['Jenis Kelamin','jenis_kelamin', 'jeniskelamin', 'gender']),
-                    'hubungan'          => $this->getExact($data, ['Hubungan','hubungan', 'hub']),
-                    'sub_hubungan'      => $this->getExact($data, ['Sub Hubungan','sub_hubungan', 'subhubungan', 'sub_hub']),
-                    'alamat_pengunjung' => $this->getExact($data, ['Alamat Pengunjung','alamat_pengunjung', 'alamat_penunjung', 'alamat', 'address']),
+                    'no'                => $this->getExact($data, ['no', 'nomor']),
+                    'wbp'               => $this->getExact($data, ['wbp', 'nama_wbp', 'namawbp', 'warga']),
+                    'nomor_registrasi'  => $this->getExact($data, ['nomor_registrasi', 'no_registrasi', 'nomer_registrasi']),
+                    'no_kunjungan'      => $this->getExact($data, ['no_kunjungan', 'nomor_kunjungan', 'nomer_kunjungan']),
+                    'pengunjung'        => $this->getExact($data, ['pengunjung', 'nama_pengunjung']),
+                    'jenis_kelamin'     => $this->getExact($data, ['jenis_kelamin', 'jeniskelamin', 'gender']),
+                    'hubungan'          => $this->getExact($data, ['hubungan', 'hub']),
+                    'sub_hubungan'      => $this->getExact($data, ['sub_hubungan', 'subhubungan', 'sub_hub']),
+                    'alamat_pengunjung' => $this->getExact($data, ['alamat_pengunjung', 'alamat_penunjung', 'alamat']),
                     'no_identitas'      => $this->normalizeNik(
-                        $this->getExact($data, ['No Identitas','no_identitas', 'noidentitas', 'nik', 'no_ktp', 'ktp', 'nomor_identitas'])
+                        $this->getExact($data, ['no_identitas', 'noidentitas', 'nik', 'ktp', 'no_ktp', 'nomor_identitas', 'no_identias'])
                     ),
                     'waktu_kunjungan'   => $this->normalizeDate(
-                        $this->getExact($data, ['Waktu Kunjungan','waktu_kunjungan', 'waktu', 'tanggal', 'tanggal_kunjungan', 'tgl', 'tgl_kunjungan'])
+                        $this->getExact($data, ['waktu_kunjungan', 'tanggal', 'tanggal_kunjungan', 'tgl', 'tgl_kunjungan', 'waktu'])
                     ),
-                    'no_kamar'          => $this->getExact($data, ['No Kamar','no_kamar', 'nokamar', 'kamar', 'blok', 'no_blok']),
-                    'catatan'           => $this->getExact($data, ['Catatan','catatan', 'notes', 'keterangan', 'ket']),
+                    'no_kamar'          => $this->getExact($data, ['no_kamar', 'nokamar', 'kamar', 'blok', 'no_blok']),
+                    'catatan'           => $this->getExact($data, ['catatan', 'notes', 'keterangan', 'ket']),
                 ];
 
                 $imported++;
@@ -155,6 +188,7 @@ class DataKunjunganController extends Controller
         } catch (\Exception $e) {
             Log::error('Import error: ' . $e->getMessage());
             Log::error($e->getTraceAsString());
+
             return response()->json([
                 'success' => false,
                 'message' => 'Terjadi kesalahan: ' . $e->getMessage(),
@@ -162,14 +196,16 @@ class DataKunjunganController extends Controller
         }
     }
 
-    // =====================================================================
+    // =========================================================================
     // UPDATE
-    // =====================================================================
+    // =========================================================================
+
     public function update(Request $request, int $id): JsonResponse
     {
+        if ($error = $this->checkAuthJson()) return $error;
+
         try {
-            $item = DataKunjungan::findOrFail($id);
-            $item->update([
+            DataKunjungan::findOrFail($id)->update([
                 'no'                => $request->no,
                 'wbp'               => $request->wbp,
                 'nomor_registrasi'  => $request->nomor_registrasi,
@@ -184,17 +220,21 @@ class DataKunjunganController extends Controller
                 'no_kamar'          => $request->no_kamar,
                 'catatan'           => $request->catatan,
             ]);
+
             return response()->json(['success' => true, 'message' => 'Data berhasil diperbarui.']);
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
 
-    // =====================================================================
+    // =========================================================================
     // DESTROY
-    // =====================================================================
+    // =========================================================================
+
     public function destroy(int $id): JsonResponse
     {
+        if ($error = $this->checkAuthJson()) return $error;
+
         try {
             DataKunjungan::findOrFail($id)->delete();
             return response()->json(['success' => true, 'message' => 'Data berhasil dihapus.']);
@@ -203,9 +243,26 @@ class DataKunjunganController extends Controller
         }
     }
 
-    // =====================================================================
+    // =========================================================================
+    // TRUNCATE
+    // =========================================================================
+
+    public function truncate(): JsonResponse
+    {
+        if ($error = $this->checkAuthJson()) return $error;
+
+        try {
+            DataKunjungan::truncate();
+            return response()->json(['success' => true, 'message' => 'Semua data berhasil dihapus.']);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+        }
+    }
+
+    // =========================================================================
     // PRIVATE: BACA EXCEL
-    // =====================================================================
+    // =========================================================================
+
     private function readExcel(string $filePath): array
     {
         Cell::setValueBinder(new StringValueBinder());
@@ -239,49 +296,41 @@ class DataKunjunganController extends Controller
             return $rawValue->getPlainText();
         }
 
-        // String / Text
         if ($dataType === \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING) {
             return (string) $rawValue;
         }
 
-        // Format tanggal → konversi ke Y-m-d
-        if ($this->isDateTimeFormat($formatCode) && is_numeric($rawValue)) {
+        if ($this->isDateFormat($formatCode) && is_numeric($rawValue)) {
             try {
                 return ExcelDate::excelToDateTimeObject((float) $rawValue)->format('Y-m-d');
             } catch (\Exception $e) {
-                $unix = ((int)$rawValue - 25569) * 86400;
-                return $unix > 0 ? date('Y-m-d', $unix) : (string)$rawValue;
+                $unix = ((int) $rawValue - 25569) * 86400;
+                return $unix > 0 ? date('Y-m-d', $unix) : (string) $rawValue;
             }
         }
 
-        // Numerik
         if (is_numeric($rawValue)) {
-            $floatVal = (float) $rawValue;
-            if ($floatVal >= 1_000_000_000 && $floatVal == floor($floatVal)) {
-                return sprintf('%.0f', $floatVal);
+            $float = (float) $rawValue;
+            if ($float >= 1_000_000_000 && $float == floor($float)) {
+                return sprintf('%.0f', $float);
             }
-            if ($floatVal == floor($floatVal)) {
-                return (string)(int)$floatVal;
+            if ($float == floor($float)) {
+                return (string) (int) $float;
             }
-            return (string)$floatVal;
+            return (string) $float;
         }
 
         return (string) $rawValue;
     }
 
-    // =====================================================================
+    // =========================================================================
     // PRIVATE: HELPERS
-    // =====================================================================
+    // =========================================================================
 
-    /**
-     * Ambil nilai dari $data berdasarkan key yang PERSIS cocok (exact match).
-     * Tidak menggunakan str_contains agar kolom 'no' tidak tertukar dengan
-     * 'no_kunjungan', 'no_kamar', dst.
-     */
     private function getExact(array $data, array $keys): ?string
     {
         foreach ($keys as $key) {
-            if (array_key_exists($key, $data) && trim((string)($data[$key] ?? '')) !== '') {
+            if (array_key_exists($key, $data) && trim((string) ($data[$key] ?? '')) !== '') {
                 return trim((string) $data[$key]);
             }
         }
@@ -291,9 +340,9 @@ class DataKunjunganController extends Controller
     private function normalizeNik(?string $value): ?string
     {
         if ($value === null || trim($value) === '') return null;
+
         $value = trim($value);
 
-        // Scientific notation: 3,57123E+15 atau 3.57123E+15
         if (preg_match('/^[\d,\.]+[eE][+\-]?\d+$/', $value)) {
             return sprintf('%.0f', (float) str_replace(',', '.', $value));
         }
@@ -302,68 +351,42 @@ class DataKunjunganController extends Controller
         return (strlen($cleaned) >= 10 && strlen($cleaned) <= 20) ? $cleaned : $value;
     }
 
-    private function isDateTimeFormat(string $formatCode): bool
+    private function isDateFormat(string $formatCode): bool
     {
         if (empty($formatCode)) return false;
-        $lower = strtolower($formatCode);
-        $dateTimePatterns = [
-            'yyyy',
-            'yy',
-            'y',
-            'mm',
-            'm',
-            'dd',
-            'd',
-            'd/m/y',
-            'm/d/y',
-            'dd/mm',
-            'mm/dd',
-            'h:mm',
-            'hh:mm',
-            'am/pm',
-            'ss',
-            'h:mm:ss'
-        ];
-        foreach ($dateTimePatterns as $pattern) {
-            if (str_contains($lower, $pattern)) {
-                return true;
-            }
+
+        $lower    = strtolower($formatCode);
+        $patterns = ['yyyy', 'yy', 'dd', 'mm', 'd/m', 'm/d', 'dd/mm', 'mm/dd', 'h:mm', 'hh:mm', 'am/pm', 'ss'];
+
+        foreach ($patterns as $pattern) {
+            if (str_contains($lower, $pattern)) return true;
         }
+
         return false;
     }
 
-    /**
-     * Normalisasi tanggal ke format Y-m-d untuk disimpan ke database.
-     */
     private function normalizeDate(?string $value): ?string
     {
         if ($value === null || trim($value) === '') return null;
+
         $value = trim($value);
 
-        // Sudah Y-m-d
-        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
-            return $value;
-        }
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) return $value;
 
-        // Y-m-d H:i:s → ambil tanggal saja
-        if (preg_match('/^(\d{4}-\d{2}-\d{2})[\sT]/', $value, $m)) {
-            return $m[1];
-        }
+        if (preg_match('/^(\d{4}-\d{2}-\d{2})[\sT]/', $value, $m)) return $m[1];
 
-        // dd/mm/yyyy atau dd-mm-yyyy (tanpa jam)
-        if (preg_match('/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/', $value, $m)) {
-            [$day, $month, $year] = [(int)$m[1], (int)$m[2], (int)$m[3]];
+        if (preg_match('/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/', $value, $m)) {
+            [$day, $month, $year] = [(int) $m[1], (int) $m[2], (int) $m[3]];
             if (checkdate($month, $day, $year)) {
                 return sprintf('%04d-%02d-%02d', $year, $month, $day);
             }
         }
 
-        // Excel serial number (angka bulat, range 1900–2100)
         if (ctype_digit($value)) {
-            $serial = (int)$value;
+            $serial = (int) $value;
             if ($serial > 1 && $serial < 73000) {
                 try {
-                    return ExcelDate::excelToDateTimeObject((float)$serial)->format('Y-m-d');
+                    return ExcelDate::excelToDateTimeObject((float) $serial)->format('Y-m-d');
                 } catch (\Exception $e) {
                     $unix = ($serial - 25569) * 86400;
                     if ($unix > 0) return date('Y-m-d', $unix);
@@ -371,13 +394,10 @@ class DataKunjunganController extends Controller
             }
         }
 
-        // Fallback strtotime
         $ts = strtotime($value);
-        if ($ts !== false && $ts > 0) {
-            return date('Y-m-d', $ts);
-        }
+        if ($ts !== false && $ts > 0) return date('Y-m-d', $ts);
 
-        Log::warning("normalizeDate: tidak dapat mem-parse: [{$value}]");
+        Log::warning("normalizeDate: gagal mem-parse nilai [{$value}]");
         return null;
     }
 }
