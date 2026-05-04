@@ -24,9 +24,8 @@ class DataKunjunganImport extends DefaultValueBinder implements ToModel, WithHea
 
         $value = trim((string)$value);
 
-        // Jika scientific notation
+        // Jika scientific notation (misal: 3.317E+15)
         if (preg_match('/^[0-9\.]+E\+\d+$/i', $value)) {
-            // Pakai string conversion tanpa float
             $value = sprintf('%.0f', $value);
         }
 
@@ -51,12 +50,10 @@ class DataKunjunganImport extends DefaultValueBinder implements ToModel, WithHea
         }
     }
 
-
     private function getValue(array $row, array $keys)
     {
         foreach ($keys as $key) {
             $key = strtolower($key);
-
             foreach ($row as $k => $v) {
                 if (strtolower(trim($k)) === $key) {
                     return $v;
@@ -68,7 +65,7 @@ class DataKunjunganImport extends DefaultValueBinder implements ToModel, WithHea
 
     public function model(array $row)
     {
-        // Skip jika kosong
+        // Skip jika baris benar-benar kosong
         if (count(array_filter($row)) === 0) {
             return null;
         }
@@ -80,46 +77,47 @@ class DataKunjunganImport extends DefaultValueBinder implements ToModel, WithHea
         $this->importedCount++;
 
         return new DataKunjungan([
-            'no' => $this->importedCount,
-
-            'wbp' => $this->getValue($row, ['wbp', 'nama_wbp']),
-            'nomor_registrasi' => $this->getValue($row, ['nomor_registrasi']),
-            'no_kunjungan' => $this->getValue($row, ['no_kunjungan']),
-            'pengunjung' => $this->getValue($row, ['pengunjung']),
-            'jenis_kelamin' => $this->mapGender(
-                $this->getValue($row, ['jenis_kelamin', 'gender'])
+            'no'               => $this->importedCount,
+            'wbp'              => $this->getValue($row, ['wbp', 'nama_wbp']),
+            'nomor_registrasi' => $this->getValue($row, ['nomor_registrasi', 'no_reg']),
+            'no_kunjungan'     => $this->getValue($row, ['no_kunjungan']),
+            'pengunjung'       => $this->getValue($row, ['pengunjung', 'nama_pengunjung']),
+            'jenis_kelamin'    => $this->mapGender(
+                $this->getValue($row, ['jenis_kelamin', 'gender', 'jk'])
             ),
-            'hubungan' => $this->getValue($row, ['hubungan']),
-            'sub_hubungan' => $this->getValue($row, ['sub_hubungan']),
+            'hubungan'         => $this->getValue($row, ['hubungan']),
+            'sub_hubungan'     => $this->getValue($row, ['sub_hubungan']),
             'alamat_pengunjung' => $this->getValue($row, ['alamat_pengunjung', 'alamat']),
-
-            'no_identitas' => $nik,
-
-            'waktu_kunjungan' => $this->normalizeDate(
-                $this->getValue($row, ['waktu_kunjungan', 'tanggal'])
+            'no_identitas'     => $nik,
+            'no_hp'            => $this->getValue($row, ['no_hp', 'telepon', 'hp']), // Tambahan sesuai UI
+            'waktu_kunjungan'  => $this->normalizeDate(
+                $this->getValue($row, ['waktu_kunjungan', 'tanggal', 'tgl'])
             ),
+            'no_kamar'         => $this->getValue($row, ['no_kamar', 'kamar']),
+            'catatan'          => $this->getValue($row, ['catatan']),
 
-            'no_kamar' => $this->getValue($row, ['no_kamar']),
-            'catatan' => $this->getValue($row, ['catatan']),
+            // Set null secara eksplisit agar tidak error saat import meskipun kolom ada di DB
+            'foto_ktp'         => null,
+            'foto_diri'        => null,
         ]);
     }
 
-  
     private function mapGender($value)
     {
         if (!$value) return null;
 
-        $v = strtolower($value);
+        $v = strtolower(trim($value));
 
-        if (in_array($v, ['l', 'laki', 'laki-laki'])) return 'Laki-laki';
-        if (in_array($v, ['p', 'perempuan'])) return 'Perempuan';
+        if (in_array($v, ['l', 'laki', 'laki-laki', 'pria', 'male'])) return 'Laki-laki';
+        if (in_array($v, ['p', 'perempuan', 'wanita', 'female'])) return 'Perempuan';
 
         return null;
     }
 
     public function bindValue(\PhpOffice\PhpSpreadsheet\Cell\Cell $cell, $value)
     {
-        if (is_numeric($value)) {
+        // Mencegah NIK/No HP berubah jadi format scientific di tingkat Spreadsheet
+        if (is_numeric($value) && strlen((string)$value) > 10) {
             $cell->setValueExplicit($value, DataType::TYPE_STRING);
             return true;
         }

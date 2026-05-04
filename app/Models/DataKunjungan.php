@@ -23,6 +23,8 @@ class DataKunjungan extends Model
         'no_identitas',
         'waktu_kunjungan',
         'no_kamar',
+        'foto_ktp',
+        'foto_diri',
         'catatan',
     ];
 
@@ -66,7 +68,6 @@ class DataKunjungan extends Model
     }
 
     /**
-     * Accessor: $item->no_hp
      * Ekstrak nomor HP dari kolom catatan.
      */
     public function getNoHpAttribute(): string
@@ -75,20 +76,16 @@ class DataKunjungan extends Model
 
         if ($catatan === '') return '-';
 
-        // Bersihkan spasi, tanda hubung, titik, kurung dari seluruh string
         $stripped = preg_replace('/[\s\-\.\(\)]/', '', $catatan);
 
-        // seluruh isi catatan memang nomor HP (dengan atau tanpa +62)
         if (preg_match('/^(\+62|0)[0-9]{7,13}$/', $stripped)) {
             return $stripped;
         }
 
-        // angka saja tanpa awalan (misal: 81234567890)
         if (preg_match('/^[0-9]{9,13}$/', $stripped)) {
             return $stripped;
         }
 
-        // ada label teks sebelum nomor HP
         $patterns = [
             '/(?:no\.?\s*hp|nomor\s*hp|no\.?\s*telp|telepon|telp|phone|hp|handphone|wa|whatsapp)\s*[:\-]?\s*((?:\+62|0)[0-9\s\-\.]{7,14})/i',
             '/((?:\+62|0)[0-9\s\-\.]{9,14})/',
@@ -99,8 +96,6 @@ class DataKunjungan extends Model
                 return preg_replace('/[\s\-\.\(\)]/', '', $matches[1]);
             }
         }
-
-        // Catatan ada tapi bukan nomor HP — tampilkan apa adanya
         return $catatan;
     }
 }

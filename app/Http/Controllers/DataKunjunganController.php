@@ -6,6 +6,7 @@ use App\Models\DataKunjungan;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Cell\StringValueBinder;
 use PhpOffice\PhpSpreadsheet\Cell\Cell;
@@ -15,14 +16,6 @@ class DataKunjunganController extends Controller
 {
     // =========================================================================
     // AUTH CHECK
-    // Dipanggil di awal setiap method sebagai pengganti middleware.
-    //
-    // - checkAuth()     → untuk method yang return View/Redirect
-    // - checkAuthJson() → untuk method yang return JsonResponse (AJAX)
-    //
-    // Cara pakai:
-    //   if ($redirect = $this->checkAuth()) return $redirect;
-    //   if ($error = $this->checkAuthJson()) return $error;
     // =========================================================================
 
     private function checkAuth()
@@ -50,7 +43,6 @@ class DataKunjunganController extends Controller
 
     public function index(Request $request)
     {
-        // Cek login — jika belum, redirect ke halaman login
         if ($redirect = $this->checkAuth()) return $redirect;
 
         $query = DataKunjungan::query();
@@ -85,7 +77,6 @@ class DataKunjunganController extends Controller
 
     public function import(Request $request): JsonResponse
     {
-        // Cek login — jika belum, return JSON 401
         if ($error = $this->checkAuthJson()) return $error;
 
         $request->validate([
@@ -165,6 +156,8 @@ class DataKunjunganController extends Controller
                     ),
                     'no_kamar'          => $this->getExact($data, ['no_kamar', 'nokamar', 'kamar', 'blok', 'no_blok']),
                     'catatan'           => $this->getExact($data, ['catatan', 'notes', 'keterangan', 'ket']),
+                    'foto_ktp'          => null,
+                    'foto_diri'         => null,
                 ];
 
                 $imported++;
@@ -205,7 +198,9 @@ class DataKunjunganController extends Controller
         if ($error = $this->checkAuthJson()) return $error;
 
         try {
-            DataKunjungan::findOrFail($id)->update([
+            $kunjungan = DataKunjungan::findOrFail($id);
+
+            $payload = [
                 'no'                => $request->no,
                 'wbp'               => $request->wbp,
                 'nomor_registrasi'  => $request->nomor_registrasi,
@@ -219,11 +214,44 @@ class DataKunjunganController extends Controller
                 'waktu_kunjungan'   => $request->waktu_kunjungan ?: null,
                 'no_kamar'          => $request->no_kamar,
                 'catatan'           => $request->catatan,
-            ]);
+            ];
 
-            return response()->json(['success' => true, 'message' => 'Data berhasil diperbarui.']);
+            // ── Foto KTP ──────────────────────────────────────────────────────
+            if ($request->hasFile('foto_ktp')) {
+                // Hapus file lama dari storage jika ada
+                if ($kunjungan->foto_ktp && Storage::disk('public')->exists($kunjungan->foto_ktp)) {
+                    Storage::disk('public')->delete($kunjungan->foto_ktp);
+                }
+
+                // Simpan file baru ke storage/app/public/ktp/
+                $path = $request->file('foto_ktp')->store('ktp', 'public');
+                $payload['foto_ktp'] = $path;
+            }
+
+            // ── Foto Diri ─────────────────────────────────────────────────────
+            if ($request->hasFile('foto_diri')) {
+                // Hapus file lama dari storage jika ada
+                if ($kunjungan->foto_diri && Storage::disk('public')->exists($kunjungan->foto_diri)) {
+                    Storage::disk('public')->delete($kunjungan->foto_diri);
+                }
+
+                // Simpan file baru ke storage/app/public/diri/
+                $path = $request->file('foto_diri')->store('diri', 'public');
+                $payload['foto_diri'] = $path;
+            }
+
+            $kunjungan->update($payload);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Data berhasil diperbarui.',
+            ]);
         } catch (\Exception $e) {
-            return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
+            Log::error("Update Error ID {$id}: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal memperbarui data: ' . $e->getMessage(),
+            ], 500);
         }
     }
 
@@ -236,7 +264,18 @@ class DataKunjunganController extends Controller
         if ($error = $this->checkAuthJson()) return $error;
 
         try {
-            DataKunjungan::findOrFail($id)->delete();
+            $kunjungan = DataKunjungan::findOrFail($id);
+
+            // Hapus foto dari storage jika ada
+            if ($kunjungan->foto_ktp && Storage::disk('public')->exists($kunjungan->foto_ktp)) {
+                Storage::disk('public')->delete($kunjungan->foto_ktp);
+            }
+            if ($kunjungan->foto_diri && Storage::disk('public')->exists($kunjungan->foto_diri)) {
+                Storage::disk('public')->delete($kunjungan->foto_diri);
+            }
+
+            $kunjungan->delete();
+
             return response()->json(['success' => true, 'message' => 'Data berhasil dihapus.']);
         } catch (\Exception $e) {
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
