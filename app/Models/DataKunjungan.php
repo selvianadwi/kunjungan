@@ -13,8 +13,6 @@ class DataKunjungan extends Model
     protected $fillable = [
         'no',
         'wbp',
-        'nomor_registrasi',
-        'no_kunjungan',
         'pengunjung',
         'jenis_kelamin',
         'hubungan',
@@ -22,7 +20,6 @@ class DataKunjungan extends Model
         'alamat_pengunjung',
         'no_identitas',
         'waktu_kunjungan',
-        'no_kamar',
         'foto_ktp',
         'foto_diri',
         'catatan',
@@ -31,7 +28,12 @@ class DataKunjungan extends Model
 
     public function getTanggalAttribute(): string
     {
+
         $raw = $this->attributes['waktu_kunjungan'] ?? null;
+
+        if ($raw === null || trim((string)$raw) === '') {
+            $raw = $this->attributes['jadwal_kunjungan'] ?? null;
+        }
 
         if ($raw === null || trim((string)$raw) === '') {
             return '-';
@@ -39,27 +41,42 @@ class DataKunjungan extends Model
 
         $raw = trim((string)$raw);
 
-        // Format Y-m-d (format standar dari DB)
         if (preg_match('/^(\d{4})-(\d{2})-(\d{2})/', $raw, $m)) {
-            return sprintf('%02d/%02d/%04d', (int)$m[3], (int)$m[2], (int)$m[1]);
+            return sprintf(
+                '%02d/%02d/%04d',
+                (int)$m[3],
+                (int)$m[2],
+                (int)$m[1]
+            );
         }
 
-        // Format dd/mm/yyyy atau dd-mm-yyyy
         if (preg_match('/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/', $raw, $m)) {
-            return sprintf('%02d/%02d/%04d', (int)$m[1], (int)$m[2], (int)$m[3]);
+            return sprintf(
+                '%02d/%02d/%04d',
+                (int)$m[1],
+                (int)$m[2],
+                (int)$m[3]
+            );
         }
 
         // Excel serial number
         if (ctype_digit($raw)) {
+
             $serial = (int)$raw;
+
             if ($serial > 1 && $serial < 73000) {
+
                 $unix = ($serial - 25569) * 86400;
-                if ($unix > 0) return date('d/m/Y', $unix);
+
+                if ($unix > 0) {
+                    return date('d/m/Y', $unix);
+                }
             }
         }
 
         // Fallback strtotime
         $ts = strtotime($raw);
+
         if ($ts !== false && $ts > 0) {
             return date('d/m/Y', $ts);
         }
@@ -67,9 +84,7 @@ class DataKunjungan extends Model
         return '-';
     }
 
-    /**
-     * Ekstrak nomor HP dari kolom catatan.
-     */
+    
     public function getNoHpAttribute(): string
     {
         $catatan = trim((string)($this->attributes['catatan'] ?? ''));
@@ -98,4 +113,29 @@ class DataKunjungan extends Model
         }
         return $catatan;
     }
+
+    public function getWbpAttribute(?string $value): ?string
+    {
+        return $this->cleanNamaWbp($value);
+    }
+
+
+    public static function cleanNamaWbp(?string $value): ?string
+    {
+        if ($value === null || trim($value) === '') {
+            return null;
+        }
+
+        $decoded = json_decode($value, true);
+
+        if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+            return implode(', ', array_filter(array_map('trim', $decoded)));
+        }
+
+        $clean = str_replace(['["', '"]', '[', ']', '"', "'"], '', $value);
+
+        return trim(preg_replace('/\s+/', ' ', $clean));
+    }
+    
+    
 }

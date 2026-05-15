@@ -14,10 +14,6 @@ use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 
 class DataKunjunganController extends Controller
 {
-    // =========================================================================
-    // AUTH CHECK
-    // =========================================================================
-
     private function checkAuth()
     {
         if (!session('logged_in')) {
@@ -37,39 +33,102 @@ class DataKunjunganController extends Controller
         return null;
     }
 
-    // =========================================================================
-    // INDEX
-    // =========================================================================
 
     public function index(Request $request)
     {
-        if ($redirect = $this->checkAuth()) return $redirect;
-
         $query = DataKunjungan::query();
 
-        if ($request->filled('search')) {
-            $search = $request->search;
-            $query->where(function ($q) use ($search) {
-                $q->where('wbp', 'like', "%{$search}%")
-                    ->orWhere('pengunjung', 'like', "%{$search}%")
-                    ->orWhere('no_identitas', 'like', "%{$search}%")
-                    ->orWhere('hubungan', 'like', "%{$search}%")
-                    ->orWhere('no_kunjungan', 'like', "%{$search}%");
-            });
+        /*
+    |--------------------------------------------------------------------------
+    | DEFAULT: HANYA DATA HARI INI
+    |--------------------------------------------------------------------------
+    */
+
+        if (
+            !$request->filled('tanggal_dari') &&
+            !$request->filled('tanggal_sampai') &&
+            !$request->filled('search')
+        ) {
+
+            // default tampil hari ini
+            $query->whereDate(
+                'waktu_kunjungan',
+                now()->toDateString()
+            );
         }
 
+        /*
+    /*
+|--------------------------------------------------------------------------
+| FILTER TANGGAL
+|--------------------------------------------------------------------------
+*/
+
         if ($request->filled('tanggal_dari')) {
-            $query->whereDate('waktu_kunjungan', '>=', $request->tanggal_dari);
+
+            $query->whereDate(
+                'waktu_kunjungan',
+                '>=',
+                $request->tanggal_dari
+            );
         }
 
         if ($request->filled('tanggal_sampai')) {
-            $query->whereDate('waktu_kunjungan', '<=', $request->tanggal_sampai);
+
+            $query->whereDate(
+                'waktu_kunjungan',
+                '<=',
+                $request->tanggal_sampai
+            );
         }
 
-        $data = $query->orderBy('waktu_kunjungan', 'desc')->paginate(20)->withQueryString();
+        /*
+    |--------------------------------------------------------------------------
+    | SEARCH
+    |--------------------------------------------------------------------------
+    */
 
-        return view('index', compact('data'));
+        if ($request->filled('search')) {
+
+            $search = trim($request->search);
+
+            $query->where(function ($q) use ($search) {
+
+                $q->where('pengunjung', 'like', "%{$search}%")
+                    ->orWhere('wbp', 'like', "%{$search}%")
+                    ->orWhere('no_identitas', 'like', "%{$search}%")
+                    ->orWhere('catatan', 'like', "%{$search}%");
+            });
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | ORDER TERBARU
+    |--------------------------------------------------------------------------
+    */
+
+        $query->orderByDesc('id');
+
+        /*
+    |--------------------------------------------------------------------------
+    | PAGINATION
+    |--------------------------------------------------------------------------
+    */
+
+        $data = $query->paginate(25)->withQueryString();
+
+        $queryForStats = clone $query;
+
+        $data        = $query->paginate(25)->withQueryString();
+        $totalLaki   = (clone $queryForStats)->whereRaw("LOWER(jenis_kelamin) LIKE '%laki%'")->count();
+        $totalWanita = (clone $queryForStats)->whereRaw("LOWER(jenis_kelamin) LIKE '%perempuan%' OR LOWER(jenis_kelamin) LIKE '%wanita%'")->count();
+
+        return view('index', compact('data', 'totalLaki', 'totalWanita'));
     }
+
+    // =========================================================================
+    // IMPORT EXCEL
+    // =========================================================================
 
     // =========================================================================
     // IMPORT EXCEL
@@ -99,10 +158,7 @@ class DataKunjunganController extends Controller
                 return response()->json(['success' => false, 'message' => 'File kosong atau tidak ada data.'], 422);
             }
 
-            // Baris pertama: judul/metadata → dilewati
             array_shift($rows);
-
-            // Baris kedua: heading kolom
             $rawHeadings = array_shift($rows);
 
             Log::info('Heading asli: ' . json_encode($rawHeadings));
@@ -174,9 +230,27 @@ class DataKunjunganController extends Controller
 
             Log::info("Import selesai: {$imported} masuk, {$skipped} dilewati.");
 
+            // ✅ FIX: Auto-sync dipanggil DI SINI, sebelum return
+            // Sebelumnya ada setelah return sehingga tidak pernah dieksekusi
+            $syncResult = ['stats' => [], 'logs' => []];
+            try {
+                $syncer     = new SinkronisasiController();
+                $syncResult = $syncer->autoSyncAfterImport();
+                Log::info('Auto-sync selesai', $syncResult['stats']);
+            } catch (\Throwable $e) {
+                Log::warning('Auto-sync gagal setelah import: ' . $e->getMessage());
+            }
+
             return response()->json([
-                'success' => true,
-                'message' => "Berhasil mengimport {$imported} data kunjungan.",
+                'success'      => true,
+                'message'      => "Berhasil mengimport {$imported} data" .
+                    ($syncResult['stats']['insert_sipirman'] ?? 0
+                        ? ", {$syncResult['stats']['insert_sipirman']} data dikirim ke SIPIRMAN."
+                        : "."),
+                'imported'     => $imported,
+                'skipped'      => $skipped,
+                'sync_stats'   => $syncResult['stats'],
+                'sync_log'     => $syncResult['logs'],
             ]);
         } catch (\Exception $e) {
             Log::error('Import error: ' . $e->getMessage());
@@ -188,7 +262,6 @@ class DataKunjunganController extends Controller
             ], 500);
         }
     }
-
     // =========================================================================
     // UPDATE
     // =========================================================================
@@ -201,7 +274,7 @@ class DataKunjunganController extends Controller
             $kunjungan = DataKunjungan::findOrFail($id);
 
             $payload = [
-                'no'                => $request->no,
+                // 'no'                => $request->no,
                 'wbp'               => $request->wbp,
                 'nomor_registrasi'  => $request->nomor_registrasi,
                 'no_kunjungan'      => $request->no_kunjungan,
@@ -361,10 +434,6 @@ class DataKunjunganController extends Controller
 
         return (string) $rawValue;
     }
-
-    // =========================================================================
-    // PRIVATE: HELPERS
-    // =========================================================================
 
     private function getExact(array $data, array $keys): ?string
     {
