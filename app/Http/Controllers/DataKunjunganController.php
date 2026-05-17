@@ -33,67 +33,37 @@ class DataKunjunganController extends Controller
         return null;
     }
 
+    // =========================================================================
+    // INDEX
+    // =========================================================================
 
     public function index(Request $request)
     {
         $query = DataKunjungan::query();
 
-        /*
-    |--------------------------------------------------------------------------
-    | DEFAULT: HANYA DATA HARI INI
-    |--------------------------------------------------------------------------
-    */
-
+        // Default: hanya data hari ini
         if (
             !$request->filled('tanggal_dari') &&
             !$request->filled('tanggal_sampai') &&
             !$request->filled('search')
         ) {
-
-            // default tampil hari ini
-            $query->whereDate(
-                'waktu_kunjungan',
-                now()->toDateString()
-            );
+            $query->whereDate('waktu_kunjungan', now('Asia/Jakarta')->toDateString());
         }
 
-        /*
-    /*
-|--------------------------------------------------------------------------
-| FILTER TANGGAL
-|--------------------------------------------------------------------------
-*/
-
+        // Filter tanggal dari
         if ($request->filled('tanggal_dari')) {
-
-            $query->whereDate(
-                'waktu_kunjungan',
-                '>=',
-                $request->tanggal_dari
-            );
+            $query->whereDate('waktu_kunjungan', '>=', $request->tanggal_dari);
         }
 
+        // Filter tanggal sampai
         if ($request->filled('tanggal_sampai')) {
-
-            $query->whereDate(
-                'waktu_kunjungan',
-                '<=',
-                $request->tanggal_sampai
-            );
+            $query->whereDate('waktu_kunjungan', '<=', $request->tanggal_sampai);
         }
 
-        /*
-    |--------------------------------------------------------------------------
-    | SEARCH
-    |--------------------------------------------------------------------------
-    */
-
+        // Search
         if ($request->filled('search')) {
-
             $search = trim($request->search);
-
             $query->where(function ($q) use ($search) {
-
                 $q->where('pengunjung', 'like', "%{$search}%")
                     ->orWhere('wbp', 'like', "%{$search}%")
                     ->orWhere('no_identitas', 'like', "%{$search}%")
@@ -101,22 +71,9 @@ class DataKunjunganController extends Controller
             });
         }
 
-        /*
-    |--------------------------------------------------------------------------
-    | ORDER TERBARU
-    |--------------------------------------------------------------------------
-    */
-
         $query->orderByDesc('id');
 
-        /*
-    |--------------------------------------------------------------------------
-    | PAGINATION
-    |--------------------------------------------------------------------------
-    */
-
-        $data = $query->paginate(25)->withQueryString();
-
+        // Clone SEBELUM paginate agar stats query tidak ikut limit
         $queryForStats = clone $query;
 
         $data        = $query->paginate(25)->withQueryString();
@@ -125,10 +82,6 @@ class DataKunjunganController extends Controller
 
         return view('index', compact('data', 'totalLaki', 'totalWanita'));
     }
-
-    // =========================================================================
-    // IMPORT EXCEL
-    // =========================================================================
 
     // =========================================================================
     // IMPORT EXCEL
@@ -158,7 +111,10 @@ class DataKunjunganController extends Controller
                 return response()->json(['success' => false, 'message' => 'File kosong atau tidak ada data.'], 422);
             }
 
+            // Baris pertama: judul/metadata → dilewati
             array_shift($rows);
+
+            // Baris kedua: heading kolom
             $rawHeadings = array_shift($rows);
 
             Log::info('Heading asli: ' . json_encode($rawHeadings));
@@ -180,21 +136,49 @@ class DataKunjunganController extends Controller
                 ], 422);
             }
 
+            // Load existing NIK+tanggal sebagai composite key untuk cek duplikat
+            $existingKeys = DataKunjungan::select('no_identitas', 'waktu_kunjungan')
+                ->whereNotNull('no_identitas')
+                ->get()
+                ->mapWithKeys(function ($row) {
+                    $tgl = $row->waktu_kunjungan
+                        ? \Carbon\Carbon::parse($row->waktu_kunjungan)->format('Y-m-d')
+                        : '__nodate__';
+                    return [$row->no_identitas . '|' . $tgl => true];
+                })
+                ->toArray();
+
             $imported = 0;
+            $updated  = 0;
             $skipped  = 0;
             $batch    = [];
+
+            // =========================================================
+            // FIX #1: Ambil ID terakhir SEBELUM proses insert apapun
+            // =========================================================
+            $lastIdSebelumInsert = DataKunjungan::max('id') ?? 0;
 
             foreach ($rows as $row) {
                 $row  = array_pad((array) $row, count($headings), null);
                 $row  = array_slice($row, 0, count($headings));
                 $data = array_combine($headings, $row);
 
+                // Skip baris kosong
                 if (empty(array_filter($data, fn($v) => $v !== null && trim((string) $v) !== ''))) {
                     $skipped++;
                     continue;
                 }
 
-                $batch[] = [
+                $nik    = $this->normalizeNik(
+                    $this->getExact($data, ['no_identitas', 'noidentitas', 'nik', 'ktp', 'no_ktp', 'nomor_identitas', 'no_identias'])
+                );
+                $tglRaw = $this->normalizeDate(
+                    $this->getExact($data, ['waktu_kunjungan', 'tanggal', 'tanggal_kunjungan', 'tgl', 'tgl_kunjungan', 'waktu'])
+                );
+                $tgl          = $tglRaw ?? '__nodate__';
+                $compositeKey = ($nik ?? '') . '|' . $tgl;
+
+                $newRow = [
                     'no'                => $this->getExact($data, ['no', 'nomor']),
                     'wbp'               => $this->getExact($data, ['wbp', 'nama_wbp', 'namawbp', 'warga']),
                     'nomor_registrasi'  => $this->getExact($data, ['nomor_registrasi', 'no_registrasi', 'nomer_registrasi']),
@@ -204,53 +188,127 @@ class DataKunjunganController extends Controller
                     'hubungan'          => $this->getExact($data, ['hubungan', 'hub']),
                     'sub_hubungan'      => $this->getExact($data, ['sub_hubungan', 'subhubungan', 'sub_hub']),
                     'alamat_pengunjung' => $this->getExact($data, ['alamat_pengunjung', 'alamat_penunjung', 'alamat']),
-                    'no_identitas'      => $this->normalizeNik(
-                        $this->getExact($data, ['no_identitas', 'noidentitas', 'nik', 'ktp', 'no_ktp', 'nomor_identitas', 'no_identias'])
-                    ),
-                    'waktu_kunjungan'   => $this->normalizeDate(
-                        $this->getExact($data, ['waktu_kunjungan', 'tanggal', 'tanggal_kunjungan', 'tgl', 'tgl_kunjungan', 'waktu'])
-                    ),
+                    'no_identitas'      => $nik,
+                    'waktu_kunjungan'   => $tglRaw,
                     'no_kamar'          => $this->getExact($data, ['no_kamar', 'nokamar', 'kamar', 'blok', 'no_blok']),
                     'catatan'           => $this->getExact($data, ['catatan', 'notes', 'keterangan', 'ket']),
                     'foto_ktp'          => null,
                     'foto_diri'         => null,
                 ];
 
-                $imported++;
+                if ($nik && isset($existingKeys[$compositeKey])) {
+                    // NIK + tanggal sudah ada → UPDATE kolom yang masih kosong/null
+                    $existing = DataKunjungan::where('no_identitas', $nik)
+                        ->when($tgl !== '__nodate__', fn($q) => $q->whereDate('waktu_kunjungan', $tgl))
+                        ->first();
 
-                if (count($batch) >= 500) {
-                    DataKunjungan::insert($batch);
-                    $batch = [];
+                    if ($existing) {
+                        $fillable = [
+                            'wbp',
+                            'nomor_registrasi',
+                            'no_kunjungan',
+                            'pengunjung',
+                            'jenis_kelamin',
+                            'hubungan',
+                            'sub_hubungan',
+                            'alamat_pengunjung',
+                            'no_kamar',
+                            'catatan',
+                        ];
+                        $updateData = [];
+                        foreach ($fillable as $field) {
+                            if (empty($existing->$field) && !empty($newRow[$field])) {
+                                $updateData[$field] = $newRow[$field];
+                            }
+                        }
+                        if (!empty($updateData)) {
+                            $existing->update($updateData);
+                            $updated++;
+                        } else {
+                            $skipped++;
+                        }
+                    } else {
+                        $skipped++;
+                    }
+                } else {
+                    // NIK + tanggal belum ada → INSERT baru
+                    $batch[]                     = $newRow;
+                    $existingKeys[$compositeKey] = true; // refresh cache
+
+                    $imported++;
+
+                    // =========================================================
+                    // FIX #2: Insert per-batch di dalam loop, bukan di luar
+                    // =========================================================
+                    if (count($batch) >= 500) {
+                        DataKunjungan::insert($batch);
+                        $batch = [];
+                    }
                 }
             }
 
+            // =========================================================
+            // FIX #3: Insert sisa batch — hanya SEKALI di sini
+            // =========================================================
             if (!empty($batch)) {
                 DataKunjungan::insert($batch);
+                $batch = [];
             }
 
-            Log::info("Import selesai: {$imported} masuk, {$skipped} dilewati.");
+            Log::info("Import selesai: {$imported} masuk, {$updated} diperbarui, {$skipped} dilewati.");
 
-            // ✅ FIX: Auto-sync dipanggil DI SINI, sebelum return
-            // Sebelumnya ada setelah return sehingga tidak pernah dieksekusi
-            $syncResult = ['stats' => [], 'logs' => []];
-            try {
-                $syncer     = new SinkronisasiController();
-                $syncResult = $syncer->autoSyncAfterImport();
-                Log::info('Auto-sync selesai', $syncResult['stats']);
-            } catch (\Throwable $e) {
-                Log::warning('Auto-sync gagal setelah import: ' . $e->getMessage());
+            // =========================================================
+            // AUTO-SYNC ke SIPIRMAN — ambil HANYA data yang baru diinsert
+            // (id > lastIdSebelumInsert yang diambil sebelum proses insert)
+            // =========================================================
+            $latestRows = [];
+            if ($imported > 0) {
+                $latestRows = DataKunjungan::select(
+                    'id',
+                    'no_identitas',
+                    'wbp',
+                    'pengunjung',
+                    'catatan',
+                    'waktu_kunjungan',
+                    'foto_ktp',
+                    'foto_diri'
+                )
+                    ->whereNotNull('no_identitas')
+                    ->where('id', '>', $lastIdSebelumInsert)
+                    ->get()
+                    ->toArray();
             }
+
+            $syncResult = [
+                'stats' => ['insert_sipirman' => 0, 'update_sipirman' => 0, 'skip' => 0, 'error' => 0],
+                'logs'  => [],
+            ];
+
+            if (!empty($latestRows)) {
+                try {
+                    $syncer     = new SinkronisasiController();
+                    $syncResult = $syncer->autoSyncAfterImport($latestRows);
+                    Log::info('Auto-sync selesai', $syncResult['stats']);
+                } catch (\Throwable $e) {
+                    Log::warning('Auto-sync gagal setelah import: ' . $e->getMessage());
+                }
+            }
+
+            $insertedSipirman = $syncResult['stats']['insert_sipirman'] ?? 0;
+            $updatedSipirman  = $syncResult['stats']['update_sipirman'] ?? 0;
+
+            $syncMsg = '';
+            if ($insertedSipirman > 0) $syncMsg .= " {$insertedSipirman} data dikirim ke SIPIRMAN.";
+            if ($updatedSipirman > 0)  $syncMsg .= " {$updatedSipirman} data SIPIRMAN diperbarui.";
 
             return response()->json([
-                'success'      => true,
-                'message'      => "Berhasil mengimport {$imported} data" .
-                    ($syncResult['stats']['insert_sipirman'] ?? 0
-                        ? ", {$syncResult['stats']['insert_sipirman']} data dikirim ke SIPIRMAN."
-                        : "."),
-                'imported'     => $imported,
-                'skipped'      => $skipped,
-                'sync_stats'   => $syncResult['stats'],
-                'sync_log'     => $syncResult['logs'],
+                'success'    => true,
+                'message'    => "Import selesai: {$imported} data baru, {$updated} diperbarui, {$skipped} dilewati.{$syncMsg}",
+                'imported'   => $imported,
+                'updated'    => $updated,
+                'skipped'    => $skipped,
+                'sync_stats' => $syncResult['stats'],
+                'sync_log'   => $syncResult['logs'],
             ]);
         } catch (\Exception $e) {
             Log::error('Import error: ' . $e->getMessage());
@@ -262,6 +320,7 @@ class DataKunjunganController extends Controller
             ], 500);
         }
     }
+
     // =========================================================================
     // UPDATE
     // =========================================================================
@@ -274,7 +333,6 @@ class DataKunjunganController extends Controller
             $kunjungan = DataKunjungan::findOrFail($id);
 
             $payload = [
-                // 'no'                => $request->no,
                 'wbp'               => $request->wbp,
                 'nomor_registrasi'  => $request->nomor_registrasi,
                 'no_kunjungan'      => $request->no_kunjungan,
@@ -289,36 +347,23 @@ class DataKunjunganController extends Controller
                 'catatan'           => $request->catatan,
             ];
 
-            // ── Foto KTP ──────────────────────────────────────────────────────
             if ($request->hasFile('foto_ktp')) {
-                // Hapus file lama dari storage jika ada
                 if ($kunjungan->foto_ktp && Storage::disk('public')->exists($kunjungan->foto_ktp)) {
                     Storage::disk('public')->delete($kunjungan->foto_ktp);
                 }
-
-                // Simpan file baru ke storage/app/public/ktp/
-                $path = $request->file('foto_ktp')->store('ktp', 'public');
-                $payload['foto_ktp'] = $path;
+                $payload['foto_ktp'] = $request->file('foto_ktp')->store('ktp', 'public');
             }
 
-            // ── Foto Diri ─────────────────────────────────────────────────────
             if ($request->hasFile('foto_diri')) {
-                // Hapus file lama dari storage jika ada
                 if ($kunjungan->foto_diri && Storage::disk('public')->exists($kunjungan->foto_diri)) {
                     Storage::disk('public')->delete($kunjungan->foto_diri);
                 }
-
-                // Simpan file baru ke storage/app/public/diri/
-                $path = $request->file('foto_diri')->store('diri', 'public');
-                $payload['foto_diri'] = $path;
+                $payload['foto_diri'] = $request->file('foto_diri')->store('diri', 'public');
             }
 
             $kunjungan->update($payload);
 
-            return response()->json([
-                'success' => true,
-                'message' => 'Data berhasil diperbarui.',
-            ]);
+            return response()->json(['success' => true, 'message' => 'Data berhasil diperbarui.']);
         } catch (\Exception $e) {
             Log::error("Update Error ID {$id}: " . $e->getMessage());
             return response()->json([
@@ -339,7 +384,6 @@ class DataKunjunganController extends Controller
         try {
             $kunjungan = DataKunjungan::findOrFail($id);
 
-            // Hapus foto dari storage jika ada
             if ($kunjungan->foto_ktp && Storage::disk('public')->exists($kunjungan->foto_ktp)) {
                 Storage::disk('public')->delete($kunjungan->foto_ktp);
             }
@@ -480,7 +524,6 @@ class DataKunjunganController extends Controller
         $value = trim($value);
 
         if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) return $value;
-
         if (preg_match('/^(\d{4}-\d{2}-\d{2})[\sT]/', $value, $m)) return $m[1];
 
         if (preg_match('/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/', $value, $m)) {
