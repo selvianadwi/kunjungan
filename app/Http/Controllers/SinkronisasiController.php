@@ -79,18 +79,6 @@ class SinkronisasiController extends Controller
         }
     }
 
-    // =========================================================================
-    // AUTO SYNC — dipanggil otomatis setelah import Excel
-    //
-    // Alur duplikat:
-    //   NIK + tanggal sama          → dianggap duplikat → UPDATE field kosong
-    //   NIK sama, tanggal berbeda   → INSERT sebagai data baru
-    //   NIK berbeda                 → INSERT sebagai data baru
-    //
-    // Foto:
-    //   SDP kosong  + SIPIRMAN ada  → isi SDP dari SIPIRMAN  (by NIK)
-    //   SIPIRMAN kosong + SDP ada   → isi SIPIRMAN dari SDP  (by NIK)
-    // =========================================================================
 
     public function autoSyncAfterImport(array $newRows = []): array
     {
@@ -125,7 +113,6 @@ class SinkronisasiController extends Controller
             return ['stats' => $stats, 'logs' => $logs];
         }
 
-        // Kumpulkan semua NIK unik dari data sumber
         $niks = array_filter(array_unique(
             array_map(
                 fn($r) => trim(is_array($r) ? ($r['no_identitas'] ?? '') : ($r->no_identitas ?? '')),
@@ -138,10 +125,9 @@ class SinkronisasiController extends Controller
             return ['stats' => $stats, 'logs' => $logs];
         }
 
-        // Load data SIPIRMAN by NIK (semua record per NIK, bukan hanya satu)
-        // Key: nik|tanggal untuk composite, dan nik saja untuk lookup foto
-        $penitipByNik         = [];   // NIK → object (untuk lookup foto, ambil yg pertama/terlengkap)
-        $penitipCompositeKeys = [];   // NIK|tanggal → object
+      
+        $penitipByNik         = [];   
+        $penitipCompositeKeys = [];  
 
         foreach (
             DB::connection('sipirman')->table('penitip')
@@ -153,7 +139,6 @@ class SinkronisasiController extends Controller
             $tgl = $this->formatTanggal($p->jadwal_kunjungan ?? null) ?? '__nodate__';
             $penitipCompositeKeys[$nik . '|' . $tgl] = $p;
 
-            // Untuk lookup foto: simpan record SIPIRMAN yang punya foto (prioritaskan yang ada foto)
             if (!isset($penitipByNik[$nik]) || (empty($penitipByNik[$nik]->foto_ktp) && !empty($p->foto_ktp))) {
                 $penitipByNik[$nik] = $p;
             }
@@ -162,8 +147,6 @@ class SinkronisasiController extends Controller
             }
         }
 
-        // Load DataKunjungan by NIK untuk keperluan sinkronisasi foto balik
-        // (SDP kosong → isi dari SIPIRMAN, dan sebaliknya)
         $kunjunganByNik = [];
         foreach (
             DataKunjungan::select('id', 'no_identitas', 'foto_ktp', 'foto_diri')
@@ -171,7 +154,6 @@ class SinkronisasiController extends Controller
                 ->get() as $k
         ) {
             $nik = trim($k->no_identitas ?? '');
-            // Prioritaskan record yang punya foto
             if (!isset($kunjunganByNik[$nik]) || (empty($kunjunganByNik[$nik]->foto_ktp) && !empty($k->foto_ktp))) {
                 $kunjunganByNik[$nik] = $k;
             }
@@ -203,11 +185,6 @@ class SinkronisasiController extends Controller
                 $tglKey       = $jadwal ?? '__nodate__';
                 $compositeKey = $nik . '|' . $tglKey;
 
-                // ===========================================================
-                // LANGKAH 1: Ambil foto dari SIPIRMAN jika SDP kosong
-                // Berdasarkan NIK (tidak terikat tanggal) karena foto orang
-                // tidak berubah meski kunjungan berbeda tanggal
-                // ===========================================================
                 $sipFoto = $penitipByNik[$nik] ?? null;
                 if ($sipFoto) {
                     if (empty($fotoKtp)  && !empty($sipFoto->foto_ktp)) {
@@ -218,10 +195,6 @@ class SinkronisasiController extends Controller
                     }
                 }
 
-                // ===========================================================
-                // LANGKAH 2: Update DataKunjungan di SDP jika foto masih kosong
-                // dan sekarang sudah ada dari SIPIRMAN
-                // ===========================================================
                 if ($rowId) {
                     $sdpUpdate = [];
                     $sdpRow    = $kunjunganByNik[$nik] ?? null;
@@ -233,7 +206,6 @@ class SinkronisasiController extends Controller
                     if (empty($sdpFotoDiri) && !empty($fotoDiri)) $sdpUpdate['foto_diri'] = $fotoDiri;
 
                     if (!empty($sdpUpdate)) {
-                        // Update semua baris SDP dengan NIK ini yang masih kosong fotonya
                         DataKunjungan::where('no_identitas', $nik)
                             ->where(function ($q) use ($sdpUpdate) {
                                 if (isset($sdpUpdate['foto_ktp'])) {
@@ -250,12 +222,9 @@ class SinkronisasiController extends Controller
                     }
                 }
 
-                // ===========================================================
-                // LANGKAH 3: Sync ke SIPIRMAN (insert atau update)
-                // ===========================================================
+                
                 if (isset($penitipCompositeKeys[$compositeKey])) {
 
-                    // NIK + tanggal SAMA → UPDATE field kosong (termasuk foto)
                     $sip    = $penitipCompositeKeys[$compositeKey];
                     $update = $this->buildUpdatePayload($sip, $nama, $hp, $namaWbp, $jadwal, $fotoKtp, $fotoDiri);
 
@@ -282,7 +251,6 @@ class SinkronisasiController extends Controller
                     }
                 } else {
 
-                    // NIK + tanggal BERBEDA → INSERT sebagai data baru
                     $newRow                              = $this->buildPenitipRow($nik, $nama, $hp, $namaWbp, $jadwal, $fotoKtp, $fotoDiri);
                     $insertBatch[]                       = $newRow;
                     $penitipCompositeKeys[$compositeKey] = (object) $newRow;
@@ -311,11 +279,6 @@ class SinkronisasiController extends Controller
             $this->addLog($logs, 'success', $stats['insert_sipirman'] . ' data baru dikirim ke SIPIRMAN.');
         }
 
-        // ===========================================================
-        // LANGKAH 4: Setelah semua baris diproses, cari NIK dari SDP
-        // yang fotonya masih kosong tapi SIPIRMAN punya → isi SDP
-        // (untuk kasus NIK yang ada di SDP tapi tidak masuk $newRows)
-        // ===========================================================
         $this->syncFotoSdpDariSipirman($niks, $logs, $stats);
 
         $this->addLog(
@@ -326,10 +289,6 @@ class SinkronisasiController extends Controller
 
         return ['stats' => $stats, 'logs' => $logs];
     }
-
-    // =========================================================================
-    // RUN — Sinkronisasi dua arah manual (tombol di UI)
-    // =========================================================================
 
     public function run()
     {
@@ -353,7 +312,6 @@ class SinkronisasiController extends Controller
 
             $this->addLog($logs, 'info', 'Memulai sinkronisasi database...');
 
-            // STEP 1 — Verifikasi koneksi
             try {
                 DB::connection('sipirman')->getPdo();
                 $this->addLog($logs, 'success', 'Koneksi SIPIRMAN berhasil.');
@@ -366,7 +324,6 @@ class SinkronisasiController extends Controller
                 ], 500);
             }
 
-            // STEP 2 — Load SIPIRMAN ke memori
             $this->addLog($logs, 'info', 'Memuat data SIPIRMAN ke memori...');
 
             $penitipRows = DB::connection('sipirman')
@@ -375,7 +332,6 @@ class SinkronisasiController extends Controller
                 ->whereNotNull('nik')
                 ->get();
 
-            // penitipByNik: satu record per NIK, prioritaskan yang ada foto
             $penitipByNik         = [];
             $penitipCompositeKeys = [];
 
@@ -386,7 +342,6 @@ class SinkronisasiController extends Controller
                 $tgl = $this->formatTanggal($p->jadwal_kunjungan ?? null) ?? '__nodate__';
                 $penitipCompositeKeys[$nik . '|' . $tgl] = $p;
 
-                // Prioritaskan record yang punya foto untuk dipakai mengisi SDP
                 if (!isset($penitipByNik[$nik]) || (empty($penitipByNik[$nik]->foto_ktp) && !empty($p->foto_ktp))) {
                     $penitipByNik[$nik] = $p;
                 }
@@ -397,7 +352,6 @@ class SinkronisasiController extends Controller
 
             $this->addLog($logs, 'info', count($penitipByNik) . ' data penitip SIPIRMAN dimuat.');
 
-            // STEP 3 — Load DataKunjungan ke memori
             $this->addLog($logs, 'info', 'Memuat index DataKunjungan ke memori...');
 
             $kunjunganRows = DataKunjungan::select(
@@ -420,7 +374,6 @@ class SinkronisasiController extends Controller
                 $tgl = $this->formatTanggal($k->getRawOriginal('waktu_kunjungan') ?? null) ?? '__nodate__';
                 $kunjunganCompositeKeys[$nik . '|' . $tgl] = $k;
 
-                // Prioritaskan record yang punya foto untuk sumber data ke SIPIRMAN
                 if (!isset($kunjunganByNik[$nik]) || (empty($kunjunganByNik[$nik]->foto_ktp) && !empty($k->foto_ktp))) {
                     $kunjunganByNik[$nik] = $k;
                 }
@@ -431,7 +384,6 @@ class SinkronisasiController extends Controller
 
             $this->addLog($logs, 'info', count($kunjunganByNik) . ' data kunjungan dimuat.');
 
-            // STEP 4 — Arah 1: SDP → SIPIRMAN
             $this->addLog($logs, 'info', 'Sinkronisasi DATA KUNJUNGAN → SIPIRMAN...');
 
             $self = $this;
@@ -458,14 +410,10 @@ class SinkronisasiController extends Controller
                             $tglKey   = $jadwal ?? '__nodate__';
                             $compositeKey = $nik . '|' . $tglKey;
 
-                            // ==================================================
-                            // Ambil foto dari SIPIRMAN jika SDP kosong (by NIK)
-                            // ==================================================
                             $sipFoto = $penitipByNik[$nik] ?? null;
                             if ($sipFoto) {
                                 if (empty($fotoKtp)  && !empty($sipFoto->foto_ktp)) {
                                     $fotoKtp = $sipFoto->foto_ktp;
-                                    // Langsung update baris SDP ini
                                     DataKunjungan::where('id', $k->id)->update(['foto_ktp' => $fotoKtp]);
                                     $stats['update_foto_ktp']++;
                                     $stats['detail_foto_ktp'][] = ['nik' => $nik, 'nama' => $k->pengunjung ?? '-', 'arah' => 'SIPIRMAN→SDP'];
@@ -482,7 +430,6 @@ class SinkronisasiController extends Controller
 
                             if (isset($penitipCompositeKeys[$compositeKey])) {
 
-                                // NIK + tanggal sama → UPDATE field kosong di SIPIRMAN
                                 $sip    = $penitipCompositeKeys[$compositeKey];
                                 $update = $self->buildUpdatePayload($sip, $nama, $hp, $namaWbp, $jadwal, $fotoKtp, $fotoDiri);
 
@@ -516,7 +463,6 @@ class SinkronisasiController extends Controller
                                 }
                             } else {
 
-                                // NIK + tanggal berbeda → INSERT ke SIPIRMAN
                                 $newRow = $self->buildPenitipRow($nik, $nama, $hp, $namaWbp, $jadwal, $fotoKtp, $fotoDiri);
                                 $insertBatch[]                       = $newRow;
                                 $penitipCompositeKeys[$compositeKey] = (object) $newRow;
@@ -552,8 +498,6 @@ class SinkronisasiController extends Controller
                 "Selesai SDP→SIPIRMAN | Insert: {$stats['insert_sipirman']} | Update: {$stats['update_sipirman']} | Skip: {$stats['skip']} | Error: {$stats['error']}"
             );
 
-            // STEP 5 — Arah 2: SIPIRMAN → SDP
-            // Load ulang SIPIRMAN terbaru setelah STEP 4 selesai
             $this->addLog($logs, 'info', 'Sinkronisasi SIPIRMAN → DATA KUNJUNGAN...');
 
             $penitipRowsFresh = DB::connection('sipirman')
@@ -562,7 +506,6 @@ class SinkronisasiController extends Controller
                 ->whereNotNull('nik')
                 ->get();
 
-            // Rebuild penitipByNik dari data fresh untuk akurasi foto terbaru
             $penitipByNikFresh = [];
             foreach ($penitipRowsFresh as $p) {
                 $nik = trim($p->nik ?? '');
@@ -591,7 +534,6 @@ class SinkronisasiController extends Controller
 
                     if (!$kunjungan) {
 
-                        // Belum ada di SDP → INSERT
                         $insertKunjunganBatch[]                       = [
                             'no'              => mt_rand(100000, 999999),
                             'wbp'             => $namaWbp,
@@ -615,7 +557,6 @@ class SinkronisasiController extends Controller
                         );
                     } else {
 
-                        // Sudah ada → UPDATE field kosong, termasuk foto (dua arah)
                         $update = [];
 
                         $rawWbp = method_exists($kunjungan, 'getRawOriginal')
@@ -630,7 +571,6 @@ class SinkronisasiController extends Controller
                         if (empty($kunjungan->pengunjung) && !empty($p->nama))     $update['pengunjung']      = $p->nama;
                         if (empty($rawTgl)                && !empty($tanggal))     $update['waktu_kunjungan'] = $tanggal;
 
-                        // Foto: SIPIRMAN → SDP (isi SDP jika kosong)
                         if (empty($kunjungan->foto_ktp)  && !empty($p->foto_ktp)) {
                             $update['foto_ktp']  = $p->foto_ktp;
                             $stats['update_foto_ktp']++;
@@ -642,7 +582,6 @@ class SinkronisasiController extends Controller
                             $stats['detail_foto_diri'][] = ['nik' => $nik, 'nama' => $p->nama ?? '-', 'arah' => 'SIPIRMAN→SDP'];
                         }
 
-                        // Foto: SDP → SIPIRMAN (isi SIPIRMAN jika kosong)
                         $sdpFotoKtp  = $kunjunganByNik[$nik]->foto_ktp  ?? null;
                         $sdpFotoDiri = $kunjunganByNik[$nik]->foto_diri ?? null;
                         $sipUpdate   = [];
@@ -729,18 +668,11 @@ class SinkronisasiController extends Controller
         }
     }
 
-    // =========================================================================
-    // HELPER: Sync foto SDP dari SIPIRMAN secara massal berdasarkan NIK
-    // Dipanggil di akhir autoSyncAfterImport untuk memastikan semua baris
-    // SDP dengan NIK terkait mendapat foto jika SIPIRMAN punya
-    // =========================================================================
-
     public function syncFotoSdpDariSipirman(array $niks, array &$logs, array &$stats): void
     {
         if (empty($niks)) return;
 
         try {
-            // Ambil foto dari SIPIRMAN untuk semua NIK yang relevan
             $sipFotos = DB::connection('sipirman')
                 ->table('penitip')
                 ->select('nik', 'foto_ktp', 'foto')
@@ -749,7 +681,6 @@ class SinkronisasiController extends Controller
                 ->get()
                 ->groupBy('nik')
                 ->map(function ($rows) {
-                    // Dari semua record per NIK, ambil foto yang tersedia
                     $fotoKtp  = null;
                     $fotoDiri = null;
                     foreach ($rows as $r) {
@@ -762,7 +693,6 @@ class SinkronisasiController extends Controller
 
             if ($sipFotos->isEmpty()) return;
 
-            // Update SDP: untuk setiap NIK, isi baris yang foto_ktp/foto_diri masih kosong
             foreach ($sipFotos as $nik => $fotos) {
                 if (!empty($fotos['foto_ktp'])) {
                     $updated = DataKunjungan::where('no_identitas', $nik)
@@ -792,18 +722,10 @@ class SinkronisasiController extends Controller
         }
     }
 
-    // =========================================================================
-    // LOG
-    // =========================================================================
-
     public function log()
     {
         return response()->json(['success' => true, 'history' => []]);
     }
-
-    // =========================================================================
-    // FOTO
-    // =========================================================================
 
     public function foto(Request $request)
     {
@@ -842,10 +764,6 @@ class SinkronisasiController extends Controller
             abort(404);
         }
     }
-
-    // =========================================================================
-    // HELPER — semua PUBLIC agar bisa dipanggil via $self di dalam closure
-    // =========================================================================
 
     public function buildPenitipRow(
         string  $nik,

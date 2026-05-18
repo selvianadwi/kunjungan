@@ -41,7 +41,6 @@ class DataKunjunganController extends Controller
     {
         $query = DataKunjungan::query();
 
-        // Default: hanya data hari ini
         if (
             !$request->filled('tanggal_dari') &&
             !$request->filled('tanggal_sampai') &&
@@ -50,17 +49,14 @@ class DataKunjunganController extends Controller
             $query->whereDate('waktu_kunjungan', now('Asia/Jakarta')->toDateString());
         }
 
-        // Filter tanggal dari
         if ($request->filled('tanggal_dari')) {
             $query->whereDate('waktu_kunjungan', '>=', $request->tanggal_dari);
         }
 
-        // Filter tanggal sampai
         if ($request->filled('tanggal_sampai')) {
             $query->whereDate('waktu_kunjungan', '<=', $request->tanggal_sampai);
         }
 
-        // Search
         if ($request->filled('search')) {
             $search = trim($request->search);
             $query->where(function ($q) use ($search) {
@@ -73,7 +69,6 @@ class DataKunjunganController extends Controller
 
         $query->orderByDesc('id');
 
-        // Clone SEBELUM paginate agar stats query tidak ikut limit
         $queryForStats = clone $query;
 
         $data        = $query->paginate(25)->withQueryString();
@@ -111,10 +106,8 @@ class DataKunjunganController extends Controller
                 return response()->json(['success' => false, 'message' => 'File kosong atau tidak ada data.'], 422);
             }
 
-            // Baris pertama: judul/metadata → dilewati
             array_shift($rows);
 
-            // Baris kedua: heading kolom
             $rawHeadings = array_shift($rows);
 
             Log::info('Heading asli: ' . json_encode($rawHeadings));
@@ -136,7 +129,6 @@ class DataKunjunganController extends Controller
                 ], 422);
             }
 
-            // Load existing NIK+tanggal sebagai composite key untuk cek duplikat
             $existingKeys = DataKunjungan::select('no_identitas', 'waktu_kunjungan')
                 ->whereNotNull('no_identitas')
                 ->get()
@@ -153,9 +145,6 @@ class DataKunjunganController extends Controller
             $skipped  = 0;
             $batch    = [];
 
-            // =========================================================
-            // FIX #1: Ambil ID terakhir SEBELUM proses insert apapun
-            // =========================================================
             $lastIdSebelumInsert = DataKunjungan::max('id') ?? 0;
 
             foreach ($rows as $row) {
@@ -163,7 +152,6 @@ class DataKunjunganController extends Controller
                 $row  = array_slice($row, 0, count($headings));
                 $data = array_combine($headings, $row);
 
-                // Skip baris kosong
                 if (empty(array_filter($data, fn($v) => $v !== null && trim((string) $v) !== ''))) {
                     $skipped++;
                     continue;
@@ -197,7 +185,6 @@ class DataKunjunganController extends Controller
                 ];
 
                 if ($nik && isset($existingKeys[$compositeKey])) {
-                    // NIK + tanggal sudah ada → UPDATE kolom yang masih kosong/null
                     $existing = DataKunjungan::where('no_identitas', $nik)
                         ->when($tgl !== '__nodate__', fn($q) => $q->whereDate('waktu_kunjungan', $tgl))
                         ->first();
@@ -231,15 +218,10 @@ class DataKunjunganController extends Controller
                         $skipped++;
                     }
                 } else {
-                    // NIK + tanggal belum ada → INSERT baru
                     $batch[]                     = $newRow;
                     $existingKeys[$compositeKey] = true; // refresh cache
 
                     $imported++;
-
-                    // =========================================================
-                    // FIX #2: Insert per-batch di dalam loop, bukan di luar
-                    // =========================================================
                     if (count($batch) >= 500) {
                         DataKunjungan::insert($batch);
                         $batch = [];
@@ -247,9 +229,6 @@ class DataKunjunganController extends Controller
                 }
             }
 
-            // =========================================================
-            // FIX #3: Insert sisa batch — hanya SEKALI di sini
-            // =========================================================
             if (!empty($batch)) {
                 DataKunjungan::insert($batch);
                 $batch = [];
@@ -257,10 +236,6 @@ class DataKunjunganController extends Controller
 
             Log::info("Import selesai: {$imported} masuk, {$updated} diperbarui, {$skipped} dilewati.");
 
-            // =========================================================
-            // AUTO-SYNC ke SIPIRMAN — ambil HANYA data yang baru diinsert
-            // (id > lastIdSebelumInsert yang diambil sebelum proses insert)
-            // =========================================================
             $latestRows = [];
             if ($imported > 0) {
                 $latestRows = DataKunjungan::select(
