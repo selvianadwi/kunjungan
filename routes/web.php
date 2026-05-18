@@ -20,19 +20,11 @@ Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
 Route::get('/kunjungan',          [DataKunjunganController::class, 'index'])->name('kunjungan.index');
 Route::post('/kunjungan/import',  [DataKunjunganController::class, 'import'])->name('kunjungan.import');
 Route::delete('/kunjungan/reset', [DataKunjunganController::class, 'truncate'])->name('kunjungan.truncate');
-Route::put('/kunjungan/{id}',     [DataKunjunganController::class, 'update'])->name('kunjungan.update');
-Route::delete('/kunjungan/{id}',  [DataKunjunganController::class, 'destroy'])->name('kunjungan.destroy');
-Route::post('/kunjungan/{id}',    [DataKunjunganController::class, 'update']); // fallback _method=PUT
 
-// ─── Sinkronisasi ───
-// Route::get('sinkronisasi/check',   [SinkronisasiController::class, 'checkConnection'])->name('sinkronisasi.check');
-// Route::post('sinkronisasi/run',    [SinkronisasiController::class, 'sync'])->name('sinkronisasi.run');
-// Route::get('sinkronisasi/preview', [SinkronisasiController::class, 'preview'])->name('sinkronisasi.preview');
-// Route::get('sinkronisasi/log',     [SinkronisasiController::class, 'getLog'])->name('sinkronisasi.log');      // ← getLog, bukan getLogHistory
-// Route::get('sinkronisasi/foto',    [SinkronisasiController::class, 'foto'])->name('sinkronisasi.foto');       // ← foto, bukan proxyFoto
+Route::put('/kunjungan/{id}',    [DataKunjunganController::class, 'update'])->name('kunjungan.update')->where('id', '[0-9]+');
+Route::post('/kunjungan/{id}',   [DataKunjunganController::class, 'update'])->where('id', '[0-9]+'); 
+Route::delete('/kunjungan/{id}', [DataKunjunganController::class, 'destroy'])->name('kunjungan.destroy')->where('id', '[0-9]+');
 
-
-// routes/web.php atau api.php — hapus setelah selesai debug
 Route::get('/sinkronisasi/debug', [SinkronisasiController::class, 'debug']);
 
 Route::prefix('sinkronisasi')->group(function () {

@@ -3,13 +3,14 @@
 namespace App\Http\Controllers;
 
 use App\Models\DataKunjungan;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
-use PhpOffice\PhpSpreadsheet\IOFactory;
-use PhpOffice\PhpSpreadsheet\Cell\StringValueBinder;
 use PhpOffice\PhpSpreadsheet\Cell\Cell;
+use PhpOffice\PhpSpreadsheet\Cell\StringValueBinder;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 
 class DataKunjunganController extends Controller
@@ -307,6 +308,29 @@ class DataKunjunganController extends Controller
         try {
             $kunjungan = DataKunjungan::findOrFail($id);
 
+            $nikLama = $kunjungan->no_identitas;
+            $nikBaru = $request->no_identitas;
+
+            // ✅ Jika NIK diubah
+            if ($nikBaru && $nikBaru !== $nikLama) {
+
+                $dataNikBaru = DataKunjungan::where('no_identitas', $nikBaru)
+                    ->where('id', '!=', $id)
+                    ->first();
+
+                if ($dataNikBaru) {
+                    // NIK baru ADA di database → ambil foto dari NIK baru
+                    // File storage & row lain tidak tersentuh
+                    $kunjungan->foto_ktp  = $dataNikBaru->foto_ktp;
+                    $kunjungan->foto_diri = $dataNikBaru->foto_diri;
+                } else {
+                    // NIK baru TIDAK ADA di database → set foto null
+                    // File storage tidak dihapus
+                    $kunjungan->foto_ktp  = null;
+                    $kunjungan->foto_diri = null;
+                }
+            }
+
             $payload = [
                 'wbp'               => $request->wbp,
                 'nomor_registrasi'  => $request->nomor_registrasi,
@@ -316,12 +340,16 @@ class DataKunjunganController extends Controller
                 'hubungan'          => $request->hubungan,
                 'sub_hubungan'      => $request->sub_hubungan,
                 'alamat_pengunjung' => $request->alamat_pengunjung,
-                'no_identitas'      => $request->no_identitas,
+                'no_identitas'      => $nikBaru,
                 'waktu_kunjungan'   => $request->waktu_kunjungan ?: null,
                 'no_kamar'          => $request->no_kamar,
                 'catatan'           => $request->catatan,
+                // ✅ Foto hasil pengecekan NIK
+                'foto_ktp'          => $kunjungan->foto_ktp,
+                'foto_diri'         => $kunjungan->foto_diri,
             ];
 
+            // Upload foto baru jika ada (override)
             if ($request->hasFile('foto_ktp')) {
                 if ($kunjungan->foto_ktp && Storage::disk('public')->exists($kunjungan->foto_ktp)) {
                     Storage::disk('public')->delete($kunjungan->foto_ktp);
@@ -364,6 +392,21 @@ class DataKunjunganController extends Controller
             }
             if ($kunjungan->foto_diri && Storage::disk('public')->exists($kunjungan->foto_diri)) {
                 Storage::disk('public')->delete($kunjungan->foto_diri);
+            }
+
+            if ($kunjungan->no_identitas) {
+                try {
+                    $tgl = $kunjungan->waktu_kunjungan
+                        ? \Carbon\Carbon::parse($kunjungan->waktu_kunjungan)->format('Y-m-d')
+                        : null;
+
+                    DB::connection('sipirman')->table('penitip')
+                        ->where('nik', $kunjungan->no_identitas)
+                        ->when($tgl, fn($q) => $q->whereDate('jadwal_kunjungan', $tgl))
+                        ->delete();
+                } catch (\Throwable $e) {
+                    Log::warning('Gagal hapus dari SIPIRMAN: ' . $e->getMessage());
+                }
             }
 
             $kunjungan->delete();

@@ -1677,7 +1677,7 @@
                                         @php
                                             $ktpUrl = route('sinkronisasi.foto', [
                                                 'path' => $item->foto_ktp,
-                                                'folder' => 'ktp', 
+                                                'folder' => 'ktp',
                                             ]);
                                         @endphp
                                         <a href="{{ $ktpUrl }}" target="_blank"
@@ -1695,7 +1695,7 @@
                                         @php
                                             $diriUrl = route('sinkronisasi.foto', [
                                                 'path' => $item->foto_diri,
-                                                'folder' => 'foto_diri', 
+                                                'folder' => 'foto_diri',
                                             ]);
                                         @endphp
                                         <a href="{{ $diriUrl }}" target="_blank"
@@ -1794,7 +1794,7 @@
                     <button class="sync-tab active" id="tabBtnSync" onclick="showTab('tabSync',this)">
                         <i class="fas fa-sync-alt" style="font-size:11px;margin-right:5px;"></i>Sinkronisasi
                     </button>
-                
+
                 </div>
 
                 <!-- TAB SYNC -->
@@ -1868,14 +1868,6 @@
                         <span class="log-panel-empty">Log sinkronisasi akan muncul di sini...</span>
                     </div>
                 </div>
-
-                <!-- TAB HISTORY -->
-                {{-- <div class="tab-pane" id="tabHistory">
-                    <div id="historyContent"
-                        style="color:var(--text-muted);font-size:13px;text-align:center;padding:24px 0;">
-                        <i class="fas fa-spinner fa-spin" style="margin-right:6px;"></i>Memuat riwayat...
-                    </div>
-                </div> --}}
 
             </div>
             <div class="modal-foot">
@@ -2029,9 +2021,11 @@
 
         window.addEventListener('DOMContentLoaded', () => {
             checkConnectionStatus();
-            setTimeout(() => {
-                runAutoSync();
-            }, 2000);
+
+            if (sessionStorage.getItem('triggerSync') === '1') {
+                sessionStorage.removeItem('triggerSync');
+                setTimeout(() => runAutoSync(), 500);
+            }
         });
 
         function checkConnectionStatus() {
@@ -2066,6 +2060,8 @@
         }
 
         function runAutoSync() {
+            toast('sync', 'Auto-Sync', 'Sinkronisasi sedang berjalan...');
+
             fetch('{{ route('sinkronisasi.run') }}', {
                     method: 'POST',
                     headers: {
@@ -2076,26 +2072,15 @@
                 .then(r => r.json())
                 .then(d => {
                     if (d.success) {
-                        const s = d.stats || {};
-                        const ada = (s.update_foto_ktp || 0) + (s.update_foto_diri || 0) +
-                            (s.penitip_baru || 0) + (s.sdp_updated || 0);
-
-                        if (ada > 0) {
-                            toast('sync', 'Auto-Sync Selesai', d.message);
-                            setTimeout(() => location.reload(), 2500);
-                        } else {
-                            document.getElementById('syncBarMsg').textContent =
-                                'Semua data sudah sinkron dengan SIPIRMAN.';
-                            document.getElementById('syncBarMeta').textContent =
-                                'Auto-sync: ' + new Date().toLocaleString('id-ID');
-                            document.getElementById('syncDot').className = 'sync-pulse-dot ok';
-                        }
+                        toast('ok', 'Sinkronisasi Selesai', d.message);
+                    } else {
+                        toast('err', 'Sync Gagal', d.message || 'Sinkronisasi gagal.');
                     }
                 })
                 .catch(() => {
+                    toast('err', 'Sync Error', 'Tidak dapat menghubungi server.');
                 });
         }
-
         // ══════════════════════════════════════════════════════════════════════════
         // SYNC MODAL
         // ══════════════════════════════════════════════════════════════════════════
@@ -2251,8 +2236,6 @@
             el.closest('.sync-stat-box').classList.remove('loading');
         }
 
-        // Jalankan sinkronisasi manual
-        // Ganti fungsi doSync() yang lama di blade dengan ini:
 
         async function doSync() {
             const btn = document.getElementById('btnRunSync');
@@ -2408,10 +2391,8 @@
                 '<i class="fas fa-sync-alt"></i> Sinkronisasi SIPIRMAN';
         }
 
-        // Log panel
         function appendLog(level, message, time) {
             const panel = document.getElementById('syncLogPanel');
-            // Hapus placeholder
             const placeholder = panel.querySelector('.log-panel-empty');
             if (placeholder) placeholder.remove();
 
@@ -2434,7 +2415,6 @@
                 '<span class="log-panel-empty">Log sinkronisasi akan muncul di sini...</span>';
         }
 
-        // ══ RIWAYAT LOG (FIX #5) ═══════════════════════════════════════════════
         let historyLoaded = false;
 
         function loadHistory() {
@@ -2490,9 +2470,9 @@
                                 ? `<div class="log-line"><span class="log-msg error">FATAL: ${h.error}</span></div>`
                                 : (h.log || []).map(l =>
                                     `<div class="log-line">
-                                                                                                                            <span class="log-time">[${l.time || ''}]</span>
-                                                                                                                            <span class="log-msg ${l.level || 'info'}">${l.message}</span>
-                                                                                                                        </div>`).join('')
+                                                                                                                                                        <span class="log-time">[${l.time || ''}]</span>
+                                                                                                                                                        <span class="log-msg ${l.level || 'info'}">${l.message}</span>
+                                                                                                                                                    </div>`).join('')
                             }
                         </div>
                     </div>
@@ -2603,14 +2583,11 @@
                         setBtnLoad('Save', false);
                         hideProg();
                         if (d.success) {
-
                             toast('ok', 'Berhasil!', d.message);
-
                             closeUpload();
-
-                            doPreview();
-
-                            runAutoSync();
+                            sessionStorage.setItem('triggerSync', '1'); // ← tandai
+                            setTimeout(() => location.reload(),
+                                1500); // ← reload dulu, sync jalan setelah reload
                         } else toast('err', 'Gagal', d.message);
                     }, 500);
                 })
@@ -2657,8 +2634,7 @@
             document.getElementById('modalEdit').classList.add('show');
         }
 
-        // Ganti dua fungsi setCurrentFotoKtp & setCurrentFotoDiri 
-        // dengan satu fungsi universal ini:
+
         function setCurrentFoto(imgId, wrapId, textId, path, label, folder) {
             const wrap = document.getElementById(wrapId);
             const img = document.getElementById(imgId);
