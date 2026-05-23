@@ -1555,9 +1555,6 @@
                 </div>
             </div>
             <div class="sync-bar-right">
-                <button class="btn btn-sync-sm btn-sm" onclick="doPreview()" id="btnBarPreview">
-                    <i class="fas fa-eye"></i> Preview
-                </button>
                 <button class="btn btn-sync btn-sm" onclick="openSync()" style="padding:5px 12px; font-size:12px;">
                     <i class="fas fa-sync-alt"></i> Sinkronisasi
                 </button>
@@ -1589,10 +1586,10 @@
                 </div>
             </div>
             <div class="stat-card c-amber">
-                <div class="stat-icon"><i class="fas fa-file-alt"></i></div>
+                <div class="stat-icon"><i class="fas fa-clock"></i></div>
                 <div class="stat-info">
-                    <span class="stat-label">Halaman</span>
-                    <div class="stat-val">{{ $data->currentPage() }}/{{ $data->lastPage() }}</div>
+                    <span class="stat-label">Terakhir Sinkronisasi</span>
+                    <div class="stat-val" id="lastSyncVal" style="font-size:13px;line-height:1.4;">—</div>
                 </div>
             </div>
         </div>
@@ -1808,12 +1805,12 @@
                     </div>
 
                     <!-- Preview grid -->
-                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+                    {{-- <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
                         <span style="font-size:13px;font-weight:600;">Pratinjau Sinkronisasi</span>
                         <button class="btn btn-sync-sm btn-sm" onclick="doPreview()" id="btnPreview">
                             <i class="fas fa-refresh"></i> Refresh
                         </button>
-                    </div>
+                    </div> --}}
                     <div class="sync-preview-grid">
                         <div class="sync-stat-box loading">
                             <div class="ssb-val" id="pvTotalKunjungan">—</div>
@@ -1827,18 +1824,6 @@
                             <div class="ssb-val" id="pvPerluSync">—</div>
                             <div class="ssb-lbl">Perlu Disinkron</div>
                         </div>
-                        {{-- <div class="sync-stat-box highlight loading">
-                            <div class="ssb-val" id="pvMatch">—</div>
-                            <div class="ssb-lbl">Akan Dicocokkan</div>
-                        </div>
-                        <div class="sync-stat-box loading">
-                            <div class="ssb-val" id="pvKtp">—</div>
-                            <div class="ssb-lbl">Foto KTP Akan Diisi</div>
-                        </div>
-                        <div class="sync-stat-box loading">
-                            <div class="ssb-val" id="pvDiri">—</div>
-                            <div class="ssb-lbl">Foto Diri Akan Diisi</div>
-                        </div> --}}
                     </div>
                     <div id="previewError"
                         style="display:none;color:var(--danger);font-size:12px;padding:8px 12px;background:var(--danger-light);border-radius:var(--radius-xs);margin-bottom:12px;">
@@ -2046,6 +2031,11 @@
                         bar.classList.remove('error-state');
                         meta.textContent = 'Terhubung ke SIPIRMAN — ' + d.total_penitip + ' penitip terdaftar.';
                         doPreviewSilent();
+                        // Ambil waktu sync terakhir dari localStorage jika ada
+                        const saved = localStorage.getItem('lastSyncTime');
+                        if (saved) {
+                            document.getElementById('lastSyncVal').textContent = saved;
+                        }
                     } else {
                         dot.className = 'sync-pulse-dot offline';
                         bar.classList.add('error-state');
@@ -2073,6 +2063,17 @@
                 .then(d => {
                     if (d.success) {
                         toast('ok', 'Sinkronisasi Selesai', d.message);
+
+                        const waktuSync = new Date().toLocaleString('id-ID', {
+                            day: '2-digit',
+                            month: 'short',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                        });
+                        document.getElementById('lastSyncVal').textContent = waktuSync;
+                        localStorage.setItem('lastSyncTime', waktuSync);
+
                     } else {
                         toast('err', 'Sync Gagal', d.message || 'Sinkronisasi gagal.');
                     }
@@ -2313,6 +2314,17 @@
                         new Date().toLocaleString('id-ID') +
                         ' (' + d.elapsed + 's)';
 
+                    const waktuSync = new Date().toLocaleString('id-ID', {
+                        day: '2-digit',
+                        month: 'short',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    });
+                    document.getElementById('lastSyncVal').textContent = waktuSync;
+                    localStorage.setItem('lastSyncTime', waktuSync);
+
+
                     doPreview();
 
                     // tombol berubah menjadi selesai
@@ -2470,9 +2482,9 @@
                                 ? `<div class="log-line"><span class="log-msg error">FATAL: ${h.error}</span></div>`
                                 : (h.log || []).map(l =>
                                     `<div class="log-line">
-                                                                                                                                                        <span class="log-time">[${l.time || ''}]</span>
-                                                                                                                                                        <span class="log-msg ${l.level || 'info'}">${l.message}</span>
-                                                                                                                                                    </div>`).join('')
+                                                                                                                                                                    <span class="log-time">[${l.time || ''}]</span>
+                                                                                                                                                                    <span class="log-msg ${l.level || 'info'}">${l.message}</span>
+                                                                                                                                                                </div>`).join('')
                             }
                         </div>
                     </div>

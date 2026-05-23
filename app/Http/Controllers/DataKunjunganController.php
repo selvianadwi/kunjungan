@@ -68,7 +68,7 @@ class DataKunjunganController extends Controller
             });
         }
 
-        $query->orderByDesc('id');
+        $query->orderBy('id', 'asc');
 
         $queryForStats = clone $query;
 
@@ -220,7 +220,7 @@ class DataKunjunganController extends Controller
                     }
                 } else {
                     $batch[]                     = $newRow;
-                    $existingKeys[$compositeKey] = true; // refresh cache
+                    $existingKeys[$compositeKey] = true; 
 
                     $imported++;
                     if (count($batch) >= 500) {
@@ -309,23 +309,18 @@ class DataKunjunganController extends Controller
             $kunjungan = DataKunjungan::findOrFail($id);
 
             $nikLama = $kunjungan->no_identitas;
-            $nikBaru = $request->no_identitas;
+            $nikBaru = $request->no_identitas ?? $nikLama;
 
-            // ✅ Jika NIK diubah
-            if ($nikBaru && $nikBaru !== $nikLama) {
-
+            // Jika NIK diubah, sesuaikan foto
+            if ($nikBaru !== $nikLama) {
                 $dataNikBaru = DataKunjungan::where('no_identitas', $nikBaru)
                     ->where('id', '!=', $id)
                     ->first();
 
                 if ($dataNikBaru) {
-                    // NIK baru ADA di database → ambil foto dari NIK baru
-                    // File storage & row lain tidak tersentuh
                     $kunjungan->foto_ktp  = $dataNikBaru->foto_ktp;
                     $kunjungan->foto_diri = $dataNikBaru->foto_diri;
                 } else {
-                    // NIK baru TIDAK ADA di database → set foto null
-                    // File storage tidak dihapus
                     $kunjungan->foto_ktp  = null;
                     $kunjungan->foto_diri = null;
                 }
@@ -344,12 +339,10 @@ class DataKunjunganController extends Controller
                 'waktu_kunjungan'   => $request->waktu_kunjungan ?: null,
                 'no_kamar'          => $request->no_kamar,
                 'catatan'           => $request->catatan,
-                // ✅ Foto hasil pengecekan NIK
                 'foto_ktp'          => $kunjungan->foto_ktp,
                 'foto_diri'         => $kunjungan->foto_diri,
             ];
 
-            // Upload foto baru jika ada (override)
             if ($request->hasFile('foto_ktp')) {
                 if ($kunjungan->foto_ktp && Storage::disk('public')->exists($kunjungan->foto_ktp)) {
                     Storage::disk('public')->delete($kunjungan->foto_ktp);
@@ -365,6 +358,74 @@ class DataKunjunganController extends Controller
             }
 
             $kunjungan->update($payload);
+
+            // Sinkronisasi ke SIPIRMAN — hanya jika NIK berubah
+            try {
+                if ($nikBaru !== $nikLama) {
+                    $syncer = new SinkronisasiController();
+
+                    $penitipLama = \Illuminate\Support\Facades\DB::connection('sipirman')
+                        ->table('penitip')
+                        ->where('nik', $nikLama)
+                        ->first();
+
+                    if ($penitipLama) {
+                        // NIK lama ada di SIPIRMAN → update row yang sama, tidak insert baru
+                        $updateSipirman = [
+                            'nik'              => $nikBaru,
+                            'nama_wbp'         => $syncer->safeTrunc($payload['wbp'] ?? null, 100),
+                            'nama'             => $syncer->safeTrunc($payload['pengunjung'] ?? null, 100),
+                            'hp'               => $syncer->safeTrunc($payload['catatan'] ?? null, 13),
+                            'jadwal_kunjungan' => $syncer->formatTanggal($payload['waktu_kunjungan'] ?? null),
+                            'foto_ktp'         => $syncer->safeTrunc($payload['foto_ktp'] ?? null, 100),
+                            'foto'             => $syncer->safeTrunc($payload['foto_diri'] ?? null, 100),
+                        ];
+
+                        \Illuminate\Support\Facades\DB::connection('sipirman')
+                            ->table('penitip')
+                            ->where('id', $penitipLama->id)
+                            ->update($updateSipirman);
+                    } else {
+                        // NIK lama tidak ada → cek NIK baru
+                        $penitipBaru = \Illuminate\Support\Facades\DB::connection('sipirman')
+                            ->table('penitip')
+                            ->where('nik', $nikBaru)
+                            ->first();
+
+                        if ($penitipBaru) {
+                            // NIK baru sudah ada → update saja
+                            $updateSipirman = [
+                                'nama_wbp'         => $syncer->safeTrunc($payload['wbp'] ?? null, 100),
+                                'nama'             => $syncer->safeTrunc($payload['pengunjung'] ?? null, 100),
+                                'hp'               => $syncer->safeTrunc($payload['catatan'] ?? null, 13),
+                                'jadwal_kunjungan' => $syncer->formatTanggal($payload['waktu_kunjungan'] ?? null),
+                                'foto_ktp'         => $syncer->safeTrunc($payload['foto_ktp'] ?? null, 100),
+                                'foto'             => $syncer->safeTrunc($payload['foto_diri'] ?? null, 100),
+                            ];
+
+                            \Illuminate\Support\Facades\DB::connection('sipirman')
+                                ->table('penitip')
+                                ->where('id', $penitipBaru->id)
+                                ->update($updateSipirman);
+                        } else {
+                            // Tidak ada sama sekali → insert baru
+                            \Illuminate\Support\Facades\DB::connection('sipirman')
+                                ->table('penitip')
+                                ->insert($syncer->buildPenitipRow(
+                                    $nikBaru,
+                                    $syncer->safeTrunc($payload['pengunjung'] ?? null, 100),
+                                    $syncer->safeTrunc($payload['catatan']    ?? null, 13),
+                                    $syncer->safeTrunc($payload['wbp']        ?? null, 100),
+                                    $syncer->formatTanggal($payload['waktu_kunjungan'] ?? null),
+                                    $payload['foto_ktp']  ?? null,
+                                    $payload['foto_diri'] ?? null,
+                                ));
+                        }
+                    }
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Sync SIPIRMAN setelah update gagal: ' . $e->getMessage());
+            }
 
             return response()->json(['success' => true, 'message' => 'Data berhasil diperbarui.']);
         } catch (\Exception $e) {
@@ -570,3 +631,4 @@ class DataKunjunganController extends Controller
         return null;
     }
 }
+

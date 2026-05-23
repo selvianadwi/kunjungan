@@ -46,7 +46,61 @@ class SinkronisasiController extends Controller
         try {
             $totalKunjungan = DataKunjungan::count();
             $totalPenitip   = DB::connection('sipirman')->table('penitip')->count();
-            $belumSync      = 0;
+
+            $dataLokal = DataKunjungan::select(
+                'no_identitas',
+                'foto_ktp',
+                'foto_diri'
+            )
+                ->whereNotNull('no_identitas')
+                ->whereNotIn('no_identitas', ['000000000', '000000000000'])
+                ->get()
+                ->keyBy('no_identitas');
+
+            $nikList = $dataLokal->keys()->toArray();
+
+            $dataSipirman = DB::connection('sipirman')
+                ->table('penitip')
+                ->select('nik', 'foto_ktp', 'foto')
+                ->whereIn('nik', $nikList)
+                ->get()
+                ->keyBy('nik');
+
+            $belumSync = 0;
+
+            foreach ($dataLokal as $nik => $lokal) {
+
+                $sipirman = $dataSipirman->get($nik);
+
+                if (!$sipirman) {
+
+                    Log::info("Belum sync - NIK belum ada: {$nik}");
+                    $belumSync++;
+
+                    continue;
+                }
+
+                $lokalPunyaFoto =
+                    !empty($lokal->foto_ktp) &&
+                    !empty($lokal->foto_diri);
+
+                $sipirmanPunyaFoto =
+                    !empty($sipirman->foto_ktp) &&
+                    !empty($sipirman->foto);
+
+                if ($lokalPunyaFoto && !$sipirmanPunyaFoto) {
+
+                    $belumSync++;
+
+                    Log::info(
+                        "Belum sync foto | NIK: {$nik}" .
+                            " | Lokal ada foto" .
+                            " | SIPIRMAN belum ada"
+                    );
+                }
+            }
+
+            Log::info("Total belum sync: {$belumSync}");
 
             DataKunjungan::select('no_identitas')
                 ->whereNotNull('no_identitas')
@@ -125,9 +179,9 @@ class SinkronisasiController extends Controller
             return ['stats' => $stats, 'logs' => $logs];
         }
 
-      
-        $penitipByNik         = [];   
-        $penitipCompositeKeys = [];  
+
+        $penitipByNik         = [];
+        $penitipCompositeKeys = [];
 
         foreach (
             DB::connection('sipirman')->table('penitip')
@@ -222,7 +276,7 @@ class SinkronisasiController extends Controller
                     }
                 }
 
-                
+
                 if (isset($penitipCompositeKeys[$compositeKey])) {
 
                     $sip    = $penitipCompositeKeys[$compositeKey];
